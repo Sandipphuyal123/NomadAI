@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Swayambhunath (Monkey Temple)",
+    "category": "temple",
+    "coordinates": [27.7149, 85.2903]
+  },
+  {
+    "name": "Boudhanath Stupa",
+    "category": "stupa",
+    "coordinates": [27.7215, 85.3616]
+  },
+  {
+    "name": "Pashupatinath Temple",
+    "category": "temple",
+    "coordinates": [27.7105, 85.3488]
+  },
+  {
+    "name": "Kathmandu Durbar Square",
+    "category": "heritage",
+    "coordinates": [27.7045, 85.3076]
+  },
+  {
+    "name": "Garden of Dreams",
+    "category": "park",
+    "coordinates": [27.7154, 85.3156]
+  },
+  {
+    "name": "Thamel",
+    "category": "neighborhood",
+    "coordinates": [27.7150, 85.3123]
+  },
+  {
+    "name": "Asan Bazaar",
+    "category": "market",
+    "coordinates": [27.7076, 85.3123]
+  },
+  {
+    "name": "Kopan Monastery",
+    "category": "monastery",
+    "coordinates": [27.7548, 85.3766]
+  }
+]

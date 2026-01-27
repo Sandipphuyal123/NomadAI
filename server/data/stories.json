@@ -1,0 +1,51 @@
+[
+  {
+    "id": "swayambhu_1",
+    "place": "Swayambhunath (Monkey Temple)",
+    "title": "Swayambhu — the hill that watches Kathmandu",
+    "text": "Swayambhu sits on a quiet hill like an old guardian, looking out over the valley. People say the stupa rose from a lotus long before the city felt like a city, and even today the air up there carries a feeling of beginnings. Prayer flags stretch like soft sentences in the wind, and the steps make your breathing slow down in a good way. Stay for a moment near the eyes of the stupa — it’s one of those places where Kathmandu feels both ancient and very alive."
+  },
+  {
+    "id": "boudha_1",
+    "place": "Boudhanath Stupa",
+    "title": "Boudha — a calm orbit",
+    "text": "At Boudha, the world moves in circles: footsteps, prayer wheels, and the slow turning of attention. The stupa is huge, but the feeling isn’t heavy — it’s strangely gentle, like being held by a rhythm. Walk one full round with the locals, and you’ll start noticing small details: butter lamps, murmurs, the scent of incense. If you go near sunset, the light makes the white dome glow and the whole area feels quietly cinematic."
+  },
+  {
+    "id": "pashupati_1",
+    "place": "Pashupatinath Temple",
+    "title": "Pashupati — river, smoke, and devotion",
+    "text": "Pashupati is not just a temple — it’s a living edge where devotion meets everyday life. The Bagmati flows past, carrying reflections, offerings, and the honest truth of time. Even if you’re only watching from a respectful distance, you can feel how deeply Kathmandu holds ritual and family. The best way to be here is calm and observant: let the sound of bells and the movement of people tell the story."
+  },
+  {
+    "id": "durbar_1",
+    "place": "Kathmandu Durbar Square",
+    "title": "Durbar Square — carved wood and old courtyards",
+    "text": "Durbar Square feels like stepping into a courtyard of stories written in wood, brick, and shadow. The buildings aren’t trying to be perfect — they’re trying to be remembered, and that’s why they’re beautiful. If you pause near a carved window or a temple base, you can almost hear the city’s older footsteps. Go in the late afternoon when the light softens and the square becomes a little calmer."
+  },
+  {
+    "id": "thamel_1",
+    "place": "Thamel",
+    "title": "Thamel — Kathmandu’s busy front porch",
+    "text": "Thamel is Kathmandu’s loud hello — shops, street music, trekking gear, coffee, and narrow lanes that keep surprising you. It can feel chaotic, but if you treat it like a stroll instead of a mission, it becomes fun. Duck into a small courtyard cafe, then come back out when you’re ready for the noise again. At night, the lights make it feel like a moving festival.",
+    "tags": ["food", "shopping", "neighborhood"]
+  },
+  {
+    "id": "asan_1",
+    "place": "Asan Bazaar",
+    "title": "Asan — the city’s pulse",
+    "text": "Asan is where Kathmandu feels most like itself — spices, metal bowls, vegetables, flowers, and people who know exactly where they’re going. The lanes are tight, but the energy is generous. If you go in the morning, you’ll see the market waking up: sellers arranging colors like artwork. Keep your pace slow, and let your senses do the exploring."
+  },
+  {
+    "id": "garden_1",
+    "place": "Garden of Dreams",
+    "title": "Garden of Dreams — a quiet pocket",
+    "text": "Just outside the busiest streets, the Garden of Dreams feels like someone turned the volume down. It’s a small, tidy escape with shaded benches and a gentle European-style calm that Kathmandu wears surprisingly well. It’s perfect between bigger stops — a place to reset your head and your feet. If the city feels intense, come here for twenty minutes and you’ll feel re-centered."
+  },
+  {
+    "id": "kopan_1",
+    "place": "Kopan Monastery",
+    "title": "Kopan — the valley from above",
+    "text": "Kopan sits higher up, where the valley spreads out and the air feels a little quieter. The monastery has a soft discipline to it — bells, chants, and long pauses that invite you to breathe slower. Even without a retreat, visiting is like stepping into a calmer version of Kathmandu for a while. If you like reflective places, Kopan will stay with you after you leave."
+  }
+]
