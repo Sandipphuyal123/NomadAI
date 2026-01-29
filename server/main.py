@@ -87,6 +87,15 @@ def _default_trip_state() -> Dict[str, Any]:
         "selected_places": [],
         "routes": [],
         "stage": "exploring",
+        "trip_profile": {
+            "time_days": None,
+            "group": None,
+            "budget": None,
+            "budget_unknown": None,
+            "comfort": None,
+            "preferences": [],
+        },
+        "asked_profile_fields": [],
     }
 
 
@@ -142,29 +151,78 @@ async def _ollama_chat(messages: List[Dict[str, str]]) -> str:
 
 def _system_prompt() -> str:
     return (
-        "You are Raj, a warm and friendly local guide from Kathmandu. You're in your late 20s, grew up here, and genuinely love showing visitors around. "
-        
-        "YOUR PERSONALITY: "
-        "- Casual and warm, use 'I'm', 'you'll', 'let's' "
-        "- Sound excited about your city "
-        "- Keep responses under 3 sentences unless telling a short story"
-        "- Always end with a question to keep conversation flowing"
-        
-        "EXAMPLE CONVERSATIONS: "
-        "User: 'Hi, I'm new to Nepal, any suggestions?' "
-        "Raj: 'Hey! I'm Raj, born and raised right here in Kathmandu! You'll absolutely love Durbar Square's ancient palaces and Boudhanath's massive stupa - both are must-sees! How many days do you have to explore?' "
-        
-        "User: 'I have $200 and 7 days' "
-        "Raj: 'Perfect! With that budget, I'd say Thamel for its lively streets and amazing momos, then Pashupatinath for that spiritual vibe, and Patan for incredible architecture - you'll get the full experience! Are you more into temples and culture, or food and markets?' "
-        
-        "RULES: "
-        "1. Always introduce yourself as Raj on first message "
-        "2. Give 2-3 specific recommendations with brief personal touches "
-        "3. ALWAYS ask about budget, time, or interests "
-        "4. Sound like you're genuinely excited to help "
-        "5. Focus only on Kathmandu - gently redirect if they ask elsewhere "
-        "6. Use natural phrases like 'trust me', 'you'll love', 'let me show you'"
+        "\n".join(
+            [
+                "🔒 SYSTEM PROMPT — “Aarav, Kathmandu Local Guide”",
+                "You are Aarav, a calm, observant, and experienced local guide from Kathmandu Valley.",
+                "",
+                "Your role:",
+                "- Act like a real human guide, not an AI.",
+                "- Speak naturally, warmly, and confidently.",
+                "- Share lived-in knowledge, small observations, and reasons for suggestions.",
+                "- Focus ONLY on Kathmandu Valley (Kathmandu, Patan, Bhaktapur, nearby areas).",
+                "- Do not talk about other parts of Nepal unless explicitly asked.",
+                "",
+                "Behavior rules:",
+                "- Never rush the user.",
+                "- Never interrogate the user with back-to-back questions.",
+                "- Always provide value before asking questions.",
+                "- Explain WHY you ask for information.",
+                "- Avoid sounding promotional or sales-driven.",
+                "",
+                "Conversation structure:",
+                "- Start with inspiration and storytelling.",
+                "- Ask for permission before planning.",
+                "- Collect key info gradually: time, group size, comfort, budget (rough), preferences.",
+                "- When information is missing, keep suggestions flexible.",
+                "- Use soft transitions, not hard commands.",
+                "",
+                "Content rules:",
+                "- Use short, meaningful stories instead of facts.",
+                "- Avoid Wikipedia-style explanations.",
+                "- Avoid exact prices — always give ranges and disclaimers.",
+                "- Mention local realities (traffic, walking pace, crowds) when relevant.",
+                "- Be honest about trade-offs (crowded vs calm, central vs quiet).",
+                "",
+                "Tone & language:",
+                "- Calm, friendly, grounded.",
+                "- Occasionally reflective (“many travelers tell me…”).",
+                "- Never robotic, never overly enthusiastic.",
+                "- Avoid emojis unless very light and human.",
+                "",
+                "Planning rules:",
+                "- Suggest no more than 2–3 places at a time.",
+                "- Justify every recommendation briefly.",
+                "- Keep itineraries flexible and swappable.",
+                "- Always remind that plans are estimates, not fixed commitments.",
+                "",
+                "Restrictions:",
+                "- Do not book anything.",
+                "- Do not mention APIs, models, or being an AI.",
+                "- Do not ask questions unrelated to Kathmandu travel.",
+                "- Do not hallucinate statistics or exact numbers.",
+                "",
+                "If the user goes off-topic or gives unclear input:",
+                "- Gently guide them back without breaking immersion.",
+            ]
+        )
     )
+
+
+FALLBACK_LINES: Dict[str, str] = {
+    "vague": "That’s alright — Kathmandu doesn’t need everything decided upfront.\nLet’s keep this flexible for now.",
+    "too_broad": "Kathmandu has many layers, and seeing everything at once can be overwhelming.\nLet me start with a couple of places that usually leave the strongest impression.",
+    "skips_info": "I can suggest places without that detail, but the experience changes a lot once I know it.\nWe can come back to it when you’re ready.",
+    "changes_mind": "That’s completely fine. Plans here are meant to shift — let me adjust the direction.",
+    "exact_prices": "I’ll keep the numbers realistic, but I won’t lock them in.\nPrices here change by season and choice, and I’d rather not mislead you.",
+    "off_topic": "That’s an interesting question.\nFor now, let me keep us focused on Kathmandu so I can guide you properly.",
+    "silent": "Take your time — no rush.\nWhen you’re ready, we can continue from wherever you’d like.",
+    "immediate_plan": "I can do that, but it’ll be much better with a little context.\nJust a couple of details, and I’ll keep it simple.",
+}
+
+
+def _fallback(key: str) -> str:
+    return FALLBACK_LINES.get(key, FALLBACK_LINES["vague"])
 
 
 def _rag_text_for_query(query: str, top_k: int = 3) -> str:
@@ -215,6 +273,233 @@ def _looks_like_build_route(message: str) -> bool:
             "route for me",
         ]
     )
+
+
+def _looks_like_too_broad(message: str) -> bool:
+    m = message.strip().lower()
+    return any(
+        k in m
+        for k in [
+            "tell me everything",
+            "everything",
+            "all places",
+            "all the places",
+            "everything to do",
+        ]
+    )
+
+
+def _looks_like_exact_prices(message: str) -> bool:
+    m = message.strip().lower()
+    return any(
+        k in m
+        for k in [
+            "exact price",
+            "exactly how much",
+            "exact cost",
+            "exactly",
+            "fixed price",
+        ]
+    ) and any(k in m for k in ["price", "cost", "fee", "budget", "rupees", "rs", "usd", "$", "dollar"])
+
+
+def _looks_like_off_topic(message: str) -> bool:
+    m = message.strip().lower()
+    return any(
+        k in m
+        for k in [
+            "ai",
+            "llm",
+            "model",
+            "ollama",
+            "prompt",
+            "token",
+            "fine tune",
+            "finetune",
+            "api",
+            "openai",
+        ]
+    )
+
+
+def _looks_like_vague_or_confused(message: str) -> bool:
+    m = message.strip().lower()
+    return m in {"help", "hi", "hello", "hey"} or any(
+        k in m
+        for k in [
+            "not sure",
+            "i don't know",
+            "dont know",
+            "confused",
+            "whatever",
+            "anything is fine",
+        ]
+    )
+
+
+def _looks_like_change_of_mind(message: str) -> bool:
+    m = message.strip().lower()
+    return any(k in m for k in ["never mind", "nevermind", "actually", "change of plan", "instead"])
+
+
+def _parse_time_days(message: str) -> Optional[int]:
+    m = message.strip().lower()
+    mm = re.search(r"\b(\d{1,2})\s*(day|days|week|weeks)\b", m)
+    if not mm:
+        return None
+    n = int(mm.group(1))
+    unit = mm.group(2)
+    if unit.startswith("week"):
+        n *= 7
+    if n <= 0:
+        return None
+    return n
+
+
+def _parse_group(message: str) -> Optional[Dict[str, Any]]:
+    m = message.strip().lower()
+
+    if any(k in m for k in ["solo", "alone", "by myself", "just me"]):
+        return {"label": "one", "count": 1}
+
+    if any(k in m for k in ["couple", "duo", "two of us", "we two"]):
+        return {"label": "duo", "count": 2}
+
+    mm = re.search(r"\bwe\s+are\s+(\d{1,2})\b", m)
+    if not mm:
+        mm = re.search(r"\b(\d{1,2})\s*(people|persons|friends|travelers|travellers)\b", m)
+    if mm:
+        n = int(mm.group(1))
+        if n <= 0:
+            return None
+        label = "many" if n >= 3 else ("duo" if n == 2 else "one")
+        return {"label": label, "count": n}
+
+    return None
+
+
+def _parse_budget(message: str) -> Tuple[Optional[float], Optional[bool]]:
+    m = message.strip().lower()
+
+    if any(k in m for k in ["don't know", "dont know", "not sure", "no idea", "haven't decided"]):
+        return None, True
+
+    mm = re.search(r"\$\s*(\d+(?:\.\d+)?)", m)
+    if not mm:
+        mm = re.search(r"\b(\d+(?:\.\d+)?)\s*(usd|dollars|dollar)\b", m)
+    if mm:
+        return float(mm.group(1)), False
+
+    return None, None
+
+
+def _parse_comfort(message: str) -> Optional[str]:
+    m = message.strip().lower()
+    if any(k in m for k in ["budget", "cheap", "backpacker", "hostel", "basic"]):
+        return "budget"
+    if any(k in m for k in ["mid", "mid-range", "midrange", "comfortable", "standard", "3 star", "3-star"]):
+        return "mid"
+    if any(k in m for k in ["luxury", "premium", "5 star", "5-star", "high-end"]):
+        return "comfortable"
+    return None
+
+
+def _parse_preferences(message: str) -> List[str]:
+    m = message.strip().lower()
+    prefs: List[str] = []
+    mapping = [
+        ("history", ["history", "historical", "heritage", "old city", "durbar"]),
+        ("religious", ["religious", "temple", "stupa", "monastery", "hindu", "buddhist"]),
+        ("architecture", ["architecture", "unique building", "tower", "dharahara", "design"]),
+        ("food", ["food", "momo", "cafes", "coffee", "street food"]),
+        ("markets", ["market", "shopping", "bazaar", "souvenir"]),
+        ("calm", ["quiet", "calm", "slow", "peaceful", "courtyard"]),
+        ("viewpoints", ["view", "viewpoint", "sunrise", "sunset", "hill", "hike"]),
+    ]
+    for label, keys in mapping:
+        if any(k in m for k in keys):
+            prefs.append(label)
+    return sorted(set(prefs))
+
+
+def _update_trip_profile_from_message(trip_state: Dict[str, Any], message: str) -> None:
+    if not message:
+        return
+
+    profile = trip_state.get("trip_profile")
+    if not isinstance(profile, dict):
+        profile = {}
+        trip_state["trip_profile"] = profile
+
+    td = _parse_time_days(message)
+    if td is not None and not profile.get("time_days"):
+        profile["time_days"] = td
+
+    group = _parse_group(message)
+    if group is not None and not profile.get("group"):
+        profile["group"] = group
+
+    budget_value, budget_unknown = _parse_budget(message)
+    if budget_value is not None and profile.get("budget") is None:
+        profile["budget"] = budget_value
+        profile["budget_unknown"] = False
+    if budget_unknown is True and profile.get("budget_unknown") is None and profile.get("budget") is None:
+        profile["budget_unknown"] = True
+
+    comfort = _parse_comfort(message)
+    if comfort is not None and not profile.get("comfort"):
+        profile["comfort"] = comfort
+
+    prefs = _parse_preferences(message)
+    if prefs:
+        existing = profile.get("preferences")
+        if not isinstance(existing, list):
+            existing = []
+        profile["preferences"] = sorted(set([str(x) for x in existing] + prefs))
+
+
+def _next_profile_field(trip_state: Dict[str, Any]) -> Optional[str]:
+    profile = trip_state.get("trip_profile")
+    if not isinstance(profile, dict):
+        return "time_days"
+
+    asked = trip_state.get("asked_profile_fields")
+    if not isinstance(asked, list):
+        asked = []
+        trip_state["asked_profile_fields"] = asked
+
+    order = ["time_days", "group", "budget", "comfort", "preferences"]
+    missing = []
+    if not profile.get("time_days"):
+        missing.append("time_days")
+    if not profile.get("group"):
+        missing.append("group")
+    if profile.get("budget") is None and profile.get("budget_unknown") is None:
+        missing.append("budget")
+    if not profile.get("comfort"):
+        missing.append("comfort")
+    if not profile.get("preferences"):
+        missing.append("preferences")
+
+    for f in order:
+        if f in missing and f not in asked:
+            return f
+
+    return None
+
+
+def _profile_question_for(field: str) -> str:
+    if field == "time_days":
+        return "Before I suggest a full flow, how many days do you have in the Kathmandu Valley? I ask because the pace changes a lot depending on time."
+    if field == "group":
+        return "Are you visiting solo, as a duo, or with a group? I ask because walking pace and the kind of places that feel comfortable can change with company."
+    if field == "budget":
+        return "Do you have a rough budget in mind (even a range), or should I keep it flexible for now? I ask because comfort and distance here can change costs quickly."
+    if field == "comfort":
+        return "What kind of comfort are you aiming for — budget, mid, or more comfortable? I ask so I don’t suggest days that feel too rushed or too expensive for your style."
+    if field == "preferences":
+        return "What do you enjoy most when you travel — history, temples, unique architecture (like Dharahara), food streets, or quieter corners? I ask so I can choose places that feel meaningful to you."
+    return "Would you like to share a little more about your trip so I can shape suggestions that fit you?"
 
 
 def _ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
@@ -380,6 +665,64 @@ async def chat(request: Request) -> JSONResponse:
     trip_state = session["trip_state"]
     history: List[Dict[str, str]] = session["history"]
 
+    if message:
+        _update_trip_profile_from_message(trip_state, message)
+
+    next_field = _next_profile_field(trip_state)
+    next_question = _profile_question_for(next_field) if next_field else None
+
+    if next_field and next_question:
+        asked = trip_state.get("asked_profile_fields")
+        if not isinstance(asked, list):
+            asked = []
+            trip_state["asked_profile_fields"] = asked
+        if next_field not in asked:
+            asked.append(next_field)
+
+    if message and _looks_like_off_topic(message):
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "reply": _fallback("off_topic"),
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": _suggestions_for_state(trip_state),
+            }
+        )
+
+    if message and _looks_like_too_broad(message):
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "reply": _fallback("too_broad"),
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": _suggestions_for_state(trip_state),
+            }
+        )
+
+    if message and _looks_like_exact_prices(message):
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "reply": _fallback("exact_prices"),
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": _suggestions_for_state(trip_state),
+            }
+        )
+
+    if message and _looks_like_change_of_mind(message):
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "reply": _fallback("changes_mind"),
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": _suggestions_for_state(trip_state),
+            }
+        )
+
     if map_event:
         et = str(map_event.get("type", ""))
 
@@ -515,7 +858,10 @@ async def chat(request: Request) -> JSONResponse:
         )
 
     if message and _is_outside_kathmandu(message):
-        reply = "That’s outside my local expertise, but I can help you deeply explore Kathmandu — temples, walks, food streets, and easy day plans. What kind of vibe do you want today?"
+        reply = (
+            "I know Kathmandu Valley best — Kathmandu, Patan, Bhaktapur, and the nearby hills — so I can guide you with real detail there. "
+            "If you tell me your vibe (quiet, culture, food, or viewpoints), I’ll suggest 2–3 places that fit and explain why."
+        )
         return JSONResponse(
             {
                 "session_id": session_id,
@@ -530,9 +876,29 @@ async def chat(request: Request) -> JSONResponse:
         rag = _rag_text_for_query(message, top_k=3) if message else ""
 
         if not message:
-            user_text = "Say hello as a Kathmandu local guide. Ask 1 gentle question about the user's vibe (temples, food, calm walk), and offer 3 concrete starter options."
+            user_text = (
+                "Introduce yourself as Aarav, a local guide from Kathmandu Valley. Start with 2–3 calm, lived-in suggestions (Kathmandu/Patan/Bhaktapur/nearby). "
+                "Ask for permission before planning. Ask at most one gentle question, and explain why you’re asking it."
+            )
         else:
             user_text = message
+
+        profile = trip_state.get("trip_profile")
+        if not isinstance(profile, dict):
+            profile = {}
+
+        planning_instruction = (
+            "\n\n"
+            "TRIP PROFILE (structured, may be incomplete):\n"
+            f"{json.dumps(profile, ensure_ascii=False)}\n"
+            "Guidance: Provide value first (2–3 places max) with a calm, lived-in reason for each. "
+            "Do not ask back-to-back questions. "
+        )
+        if next_question:
+            planning_instruction += (
+                "End with exactly one gentle follow-up question (and explain why you’re asking it) using this wording:\n"
+                f"{next_question}"
+            )
 
         messages = [{"role": "system", "content": _system_prompt()}]
         messages.extend(history[-8:])
@@ -543,6 +909,7 @@ async def chat(request: Request) -> JSONResponse:
                     f"TRIP STATE:\n{_compact_state(trip_state)}\n\n"
                     + (f"RAG CONTEXT:\n{rag}\n\n" if rag else "")
                     + user_text
+                    + planning_instruction
                 ),
             }
         )
@@ -555,9 +922,18 @@ async def chat(request: Request) -> JSONResponse:
             session["history"] = history[-24:]
     except Exception:
         if not message:
-            reply = "Namaste! I'm Raj, your local guide here in Kathmandu. I'd love to show you around! Where are you staying - Thamel, Boudha, or the Durbar Square area?"
+            reply = (
+                "Namaste — I’m Aarav. Kathmandu Valley can feel like a small maze at first, but it’s a gentle one once you find your rhythm. "
+                "If you’d like, I can suggest 2–3 places to start — are you looking for something calm, cultural, or food-focused?"
+            )
         else:
-            reply = "Hey there! I'm Raj, your local guide. I'm having some tech issues right now, but I'd still love to help you explore Kathmandu! What brings you to our beautiful city?"
+            if _looks_like_vague_or_confused(message):
+                reply = _fallback("vague")
+            else:
+                reply = (
+                    "I’m with you. Let’s keep this simple and flexible for now. "
+                    "Tell me what kind of day you want in the Valley — quiet courtyards, busy old streets, temples, or viewpoints?"
+                )
 
     return JSONResponse(
         {
