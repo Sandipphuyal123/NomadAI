@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import urllib.parse
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,6 +81,58 @@ STORIES = _load_json(DATA_DIR / "stories.json")
 RAG = SimpleRAG(STORIES)
 
 
+def _place_id(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    return s or "place"
+
+
+def _story_for_place(name: str) -> Optional[Dict[str, Any]]:
+    for s in STORIES:
+        if str(s.get("place", "")).strip().lower() == str(name).strip().lower():
+            return s
+    return None
+
+
+def _short_story_text(text: str, max_len: int = 240) -> str:
+    t = " ".join(str(text).split())
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1].rstrip() + "…"
+
+
+def _cost_range_for_category(cat: str) -> str:
+    c = str(cat or "").lower()
+    if c in {"temple", "stupa", "heritage", "monastery"}:
+        return "Low to medium (entry fees vary). Estimated range — not fixed."
+    if c in {"park"}:
+        return "Low. Estimated range — not fixed."
+    if c in {"market", "neighborhood"}:
+        return "Flexible (depends on spending). Estimated range — not fixed."
+    return "Flexible. Estimated range — not fixed."
+
+
+PLACES: Dict[str, Dict[str, Any]] = {}
+for p in POIS:
+    name = str(p.get("name", "")).strip()
+    coords = p.get("coordinates")
+    if not name or not (isinstance(coords, list) and len(coords) == 2):
+        continue
+    pid = _place_id(name)
+    story = _story_for_place(name) or {}
+    story_text = _short_story_text(story.get("text", ""))
+    PLACES[pid] = {
+        "id": pid,
+        "name_en": name,
+        "lat": float(coords[0]),
+        "lng": float(coords[1]),
+        "category": str(p.get("category", "")),
+        "storyShort": story_text,
+        "costRange": _cost_range_for_category(str(p.get("category", ""))),
+        "images": [],
+        "review": "A well-loved stop for first-time visitors — easy to reach, and memorable without feeling rushed.",
+    }
+
+
 def _default_trip_state() -> Dict[str, Any]:
     return {
         "city": "Kathmandu",
@@ -87,6 +140,10 @@ def _default_trip_state() -> Dict[str, Any]:
         "selected_places": [],
         "routes": [],
         "stage": "exploring",
+        "map_view": {"center": list(KATHMANDU_CENTER), "zoom": 13},
+        "ui_stage": "intro",
+        "planning_permission": None,
+        "trip": {"days": [], "current_day": 1, "notes": ""},
         "trip_profile": {
             "time_days": None,
             "group": None,
@@ -97,6 +154,100 @@ def _default_trip_state() -> Dict[str, Any]:
         },
         "asked_profile_fields": [],
     }
+
+
+def _looks_like_yes(message: str) -> bool:
+    m = message.strip().lower()
+    return m in {"yes", "y", "yeah", "yep", "ok", "okay", "sure", "please", "yes please"} or "yes" in m
+
+
+def _looks_like_no(message: str) -> bool:
+    m = message.strip().lower()
+    return m in {"no", "n", "nope", "not now"} or ("no" in m and "not" in m)
+
+
+def _is_trip_complete(trip_state: Dict[str, Any]) -> bool:
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+    stay_days = None
+    if isinstance(profile, dict) and isinstance(profile.get("time_days"), int):
+        stay_days = int(profile.get("time_days") or 0)
+    if not stay_days or stay_days <= 0:
+        return False
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days = trip.get("days") if isinstance(trip, dict) else None
+    if not isinstance(days, list) or not days:
+        return False
+    confirmed = 0
+    for d in days:
+        if isinstance(d, dict) and d.get("confirmed") is True:
+            confirmed += 1
+    return confirmed >= stay_days
+
+
+def _candidate_pois(trip_state: Dict[str, Any], limit: int = 3) -> List[Dict[str, Any]]:
+    planned_ids: set[str] = set()
+    try:
+        trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+        days = trip.get("days") if isinstance(trip, dict) else None
+        if isinstance(days, list):
+            for d in days:
+                if not isinstance(d, dict):
+                    continue
+                visits = d.get("visits")
+                if isinstance(visits, list):
+                    for pid in visits:
+                        if isinstance(pid, str):
+                            planned_ids.add(pid)
+    except Exception:
+        planned_ids = set()
+
+    out: List[Dict[str, Any]] = []
+    for p in POIS:
+        pid = _place_id(str(p.get("name", "")))
+        if pid in planned_ids:
+            continue
+        place = PLACES.get(pid)
+        if not place:
+            continue
+        out.append(place)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _day_preview_text(trip_state: Dict[str, Any], day_index: int) -> Optional[str]:
+    if not trip_state.get("hotel"):
+        return None
+    d = _find_day(trip_state, day_index)
+    visits = d.get("visits")
+    if not isinstance(visits, list) or not (1 <= len(visits) <= 2):
+        return None
+    names = []
+    for pid in visits[:2]:
+        p = PLACES.get(str(pid))
+        if p:
+            names.append(str(p.get("name_en") or pid))
+    if not names:
+        return None
+
+    cost_ranges = []
+    for pid in visits[:2]:
+        p = PLACES.get(str(pid))
+        if p and p.get("costRange"):
+            cost_ranges.append(str(p.get("costRange")))
+    cost_text = cost_ranges[0] if cost_ranges else "Flexible. Estimated range — not fixed."
+
+    route = "Hotel → " + " → ".join(names)
+    if len(names) == 1:
+        times = "Suggested timing: 9:00–12:00, then a relaxed lunch break."
+    else:
+        times = "Suggested timing: 9:00–12:00 for the first stop, 13:30–16:30 for the second (less rushing in traffic)."
+
+    return (
+        f"Day {day_index}: {route}\n"
+        f"{times}\n"
+        f"Estimated cost range: {cost_text}"
+    )
 
 
 def _default_session() -> Dict[str, Any]:
@@ -116,6 +267,20 @@ def _compact_state(trip_state: Dict[str, Any]) -> str:
 def _is_outside_kathmandu(message: str) -> bool:
     tokens = set(_tokenize(message))
     return any(c in tokens for c in OTHER_CITIES)
+
+
+def _looks_like_place_name(message: str) -> Optional[str]:
+    m = message.strip()
+    if not m:
+        return None
+    if m.lower().startswith("tell me about "):
+        return m[13:].strip()
+    return m
+
+
+def _looks_like_save_day(message: str) -> bool:
+    m = message.strip().lower()
+    return any(k in m for k in ["save day", "confirm day", "save this day", "save it", "confirm it"])
 
 
 async def _ollama_generate(prompt: str) -> str:
@@ -154,14 +319,14 @@ def _system_prompt() -> str:
         "\n".join(
             [
                 "🔒 SYSTEM PROMPT — “Aarav, Kathmandu Local Guide”",
-                "You are Aarav, a calm, observant, and experienced local guide from Kathmandu Valley.",
+                "You are Aarav, a calm, observant, and experienced local guide from Kathmandu.",
                 "",
                 "Your role:",
                 "- Act like a real human guide, not an AI.",
                 "- Speak naturally, warmly, and confidently.",
                 "- Share lived-in knowledge, small observations, and reasons for suggestions.",
-                "- Focus ONLY on Kathmandu Valley (Kathmandu, Patan, Bhaktapur, nearby areas).",
-                "- Do not talk about other parts of Nepal unless explicitly asked.",
+                "- Focus ONLY on Kathmandu.",
+                "- Do not talk about other parts of Nepal.",
                 "",
                 "Behavior rules:",
                 "- Never rush the user.",
@@ -215,7 +380,7 @@ FALLBACK_LINES: Dict[str, str] = {
     "skips_info": "I can suggest places without that detail, but the experience changes a lot once I know it.\nWe can come back to it when you’re ready.",
     "changes_mind": "That’s completely fine. Plans here are meant to shift — let me adjust the direction.",
     "exact_prices": "I’ll keep the numbers realistic, but I won’t lock them in.\nPrices here change by season and choice, and I’d rather not mislead you.",
-    "off_topic": "That’s an interesting question.\nFor now, let me keep us focused on Kathmandu so I can guide you properly.",
+    "off_topic": "Let's focus on Kathmandu plans for now — we can explore other topics after your itinerary.",
     "silent": "Take your time — no rush.\nWhen you’re ready, we can continue from wherever you’d like.",
     "immediate_plan": "I can do that, but it’ll be much better with a little context.\nJust a couple of details, and I’ll keep it simple.",
 }
@@ -409,10 +574,11 @@ def _parse_preferences(message: str) -> List[str]:
     prefs: List[str] = []
     mapping = [
         ("history", ["history", "historical", "heritage", "old city", "durbar"]),
-        ("religious", ["religious", "temple", "stupa", "monastery", "hindu", "buddhist"]),
+        ("spiritual", ["spiritual", "religious", "temple", "stupa", "monastery", "hindu", "buddhist"]),
         ("architecture", ["architecture", "unique building", "tower", "dharahara", "design"]),
         ("food", ["food", "momo", "cafes", "coffee", "street food"]),
         ("markets", ["market", "shopping", "bazaar", "souvenir"]),
+        ("walking", ["walk", "walking", "stroll", "on foot"]),
         ("calm", ["quiet", "calm", "slow", "peaceful", "courtyard"]),
         ("viewpoints", ["view", "viewpoint", "sunrise", "sunset", "hill", "hike"]),
     ]
@@ -490,7 +656,7 @@ def _next_profile_field(trip_state: Dict[str, Any]) -> Optional[str]:
 
 def _profile_question_for(field: str) -> str:
     if field == "time_days":
-        return "Before I suggest a full flow, how many days do you have in the Kathmandu Valley? I ask because the pace changes a lot depending on time."
+        return "Before I suggest a full flow, how many days do you have in Kathmandu? I ask because the pace changes a lot depending on time."
     if field == "group":
         return "Are you visiting solo, as a duo, or with a group? I ask because walking pace and the kind of places that feel comfortable can change with company."
     if field == "budget":
@@ -540,6 +706,55 @@ def _build_routes(trip_state: Dict[str, Any]) -> List[Dict[str, Any]]:
     routes = []
     for i in range(len(points) - 1):
         routes.append({"from": points[i][0], "to": points[i + 1][0], "polyline": [points[i][1], points[i + 1][1]]})
+    return routes
+
+
+async def _build_routes_for_confirmed_days(trip_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    hotel = trip_state.get("hotel") if isinstance(trip_state, dict) else None
+    if not isinstance(hotel, dict):
+        return []
+    hc = hotel.get("coordinates")
+    if not (isinstance(hc, list) and len(hc) == 2):
+        return []
+
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days = trip.get("days") if isinstance(trip, dict) else None
+    if not isinstance(days, list):
+        return []
+
+    routes: List[Dict[str, Any]] = []
+    for d in days:
+        if not isinstance(d, dict) or d.get("confirmed") is not True:
+            continue
+        day_index = d.get("dayIndex")
+        if not isinstance(day_index, int):
+            continue
+        visits = d.get("visits")
+        if not isinstance(visits, list) or len(visits) == 0:
+            continue
+
+        coords: List[List[float]] = [hc]
+        names: List[str] = ["Hotel"]
+        for pid in visits[:2]:
+            place = PLACES.get(str(pid))
+            if not place:
+                continue
+            coords.append([float(place["lat"]), float(place["lng"])])
+            names.append(str(place.get("name_en") or pid))
+
+        if len(coords) < 2:
+            continue
+
+        for i in range(len(coords) - 1):
+            polyline = None
+            try:
+                polyline = await _osrm_leg_polyline(coords[i], coords[i + 1])
+            except Exception:
+                polyline = None
+            if not polyline:
+                polyline = [coords[i], coords[i + 1]]
+            routes.append({"day": day_index, "from": names[i], "to": names[i + 1], "polyline": polyline})
+
     return routes
 
 
@@ -599,14 +814,40 @@ async def _build_routes_osrm(trip_state: Dict[str, Any]) -> List[Dict[str, Any]]
 def _suggestions_for_state(trip_state: Dict[str, Any]) -> List[str]:
     suggestions: List[str] = []
 
+    planned_ids: set[str] = set()
+    try:
+        for p in trip_state.get("selected_places", []) or []:
+            n = str(p.get("name", ""))
+            if n:
+                planned_ids.add(_place_id(n))
+    except Exception:
+        planned_ids = set()
+
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days = trip.get("days") if isinstance(trip, dict) else None
+    if isinstance(days, list):
+        for d in days:
+            if not isinstance(d, dict):
+                continue
+            visits = d.get("visits")
+            if isinstance(visits, list):
+                for pid in visits:
+                    if isinstance(pid, str):
+                        planned_ids.add(pid)
+
     if not trip_state.get("hotel"):
         suggestions.append("I'm staying in Thamel")
         suggestions.append("I'm staying near Boudha")
         suggestions.append("I'm staying near Durbar Square")
 
     if not trip_state.get("selected_places"):
-        for p in POIS[:5]:
+        for p in POIS:
+            pid = _place_id(str(p.get("name", "")))
+            if pid in planned_ids:
+                continue
             suggestions.append(f"Tell me about {p['name']}")
+            if len(suggestions) >= 5:
+                break
     else:
         suggestions.append("Build a simple route for me")
         suggestions.append("Add a calm place for a break")
@@ -616,7 +857,18 @@ def _suggestions_for_state(trip_state: Dict[str, Any]) -> List[str]:
 
 
 def _map_actions_from_state(trip_state: Dict[str, Any]) -> Dict[str, Any]:
-    actions: Dict[str, Any] = {"center": list(KATHMANDU_CENTER), "zoom": 13, "markers": [], "routes": []}
+    view = trip_state.get("map_view") if isinstance(trip_state, dict) else None
+    center = list(KATHMANDU_CENTER)
+    zoom = 13
+    if isinstance(view, dict):
+        c = view.get("center")
+        z = view.get("zoom")
+        if isinstance(c, list) and len(c) == 2:
+            center = c
+        if isinstance(z, int):
+            zoom = z
+
+    actions: Dict[str, Any] = {"center": center, "zoom": zoom, "markers": [], "routes": []}
 
     if trip_state.get("hotel"):
         actions["markers"].append({"type": "hotel", **trip_state["hotel"]})
@@ -630,6 +882,238 @@ def _map_actions_from_state(trip_state: Dict[str, Any]) -> Dict[str, Any]:
     return actions
 
 
+def _set_map_view(trip_state: Dict[str, Any], center: List[float], zoom: int = 15) -> None:
+    if not isinstance(trip_state, dict):
+        return
+    if not (isinstance(center, list) and len(center) == 2):
+        return
+    trip_state["map_view"] = {"center": center, "zoom": zoom}
+
+
+def _find_poi_mention(message: str) -> Optional[Dict[str, Any]]:
+    m = message.strip().lower()
+    if not m:
+        return None
+
+    best = None
+    best_len = 0
+    for p in POIS:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            continue
+        n = name.lower()
+        if n in m and len(n) > best_len:
+            best = p
+            best_len = len(n)
+    return best
+
+
+def _looks_like_affirmation(message: str) -> bool:
+    m = message.strip().lower()
+    return any(
+        k in m
+        for k in [
+            "i like",
+            "sounds good",
+            "let's go",
+            "lets go",
+            "i want to go",
+            "add it",
+            "include",
+            "yes",
+            "okay",
+            "ok",
+        ]
+    )
+
+
+def _split_into_days(items: List[Any], days: int) -> List[List[Any]]:
+    if days <= 1:
+        return [items]
+    out = [[] for _ in range(days)]
+    for i, it in enumerate(items):
+        out[i % days].append(it)
+    return out
+
+
+def _google_maps_dir_link(points: List[List[float]]) -> Optional[str]:
+    if not points or len(points) < 2:
+        return None
+    origin = f"{points[0][0]},{points[0][1]}"
+    destination = f"{points[-1][0]},{points[-1][1]}"
+    waypoints = "|".join(f"{p[0]},{p[1]}" for p in points[1:-1])
+
+    params = {"api": "1", "origin": origin, "destination": destination}
+    if waypoints:
+        params["waypoints"] = waypoints
+    return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(params, safe=",|")
+
+
+def _ensure_trip_days(trip_state: Dict[str, Any], stay_days: int) -> None:
+    if not isinstance(trip_state, dict):
+        return
+    trip = trip_state.get("trip")
+    if not isinstance(trip, dict):
+        trip = {"days": [], "current_day": 1, "notes": ""}
+        trip_state["trip"] = trip
+    days = trip.get("days")
+    if not isinstance(days, list):
+        days = []
+        trip["days"] = days
+    if stay_days <= 0:
+        return
+    if len(days) >= stay_days:
+        return
+    for i in range(len(days) + 1, stay_days + 1):
+        days.append({"dayIndex": i, "hotelPlaceId": None, "visits": [], "confirmed": False})
+
+
+def _current_day_index(trip_state: Dict[str, Any]) -> int:
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    if isinstance(trip, dict):
+        cd = trip.get("current_day")
+        if isinstance(cd, int) and cd >= 1:
+            return cd
+    return 1
+
+
+def _find_day(trip_state: Dict[str, Any], day_index: int) -> Dict[str, Any]:
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    if not isinstance(trip, dict):
+        trip = {"days": [], "current_day": 1, "notes": ""}
+        trip_state["trip"] = trip
+    days = trip.get("days")
+    if not isinstance(days, list):
+        days = []
+        trip["days"] = days
+    for d in days:
+        if isinstance(d, dict) and d.get("dayIndex") == day_index:
+            return d
+    d = {"dayIndex": day_index, "hotelPlaceId": None, "visits": [], "confirmed": False}
+    days.append(d)
+    return d
+
+
+def _add_visit_to_day(trip_state: Dict[str, Any], day_index: int, place_id: str) -> Tuple[bool, str]:
+    d = _find_day(trip_state, day_index)
+    visits = d.get("visits")
+    if not isinstance(visits, list):
+        visits = []
+        d["visits"] = visits
+    if place_id in visits:
+        return False, "already_added"
+    if len(visits) >= 2:
+        return False, "day_full"
+    visits.append(place_id)
+    return True, "added"
+
+
+def _confirm_day(trip_state: Dict[str, Any], day_index: int) -> None:
+    d = _find_day(trip_state, day_index)
+    d["confirmed"] = True
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    if isinstance(trip, dict):
+        trip["current_day"] = max(day_index + 1, int(trip.get("current_day") or 1))
+
+
+def _export_user_profile(trip_state: Dict[str, Any]) -> Dict[str, Any]:
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+    out = {
+        "stay_days": None,
+        "group_size": None,
+        "budget_range": None,
+        "comfort_level": None,
+        "preferences": [],
+    }
+    if not isinstance(profile, dict):
+        return out
+
+    td = profile.get("time_days")
+    if isinstance(td, int):
+        out["stay_days"] = td
+
+    group = profile.get("group")
+    if isinstance(group, dict):
+        c = group.get("count")
+        if isinstance(c, int):
+            out["group_size"] = c
+
+    budget = profile.get("budget")
+    if isinstance(budget, (int, float)):
+        out["budget_range"] = "flexible"
+    if profile.get("budget_unknown") is True:
+        out["budget_range"] = "flexible"
+
+    comfort = profile.get("comfort")
+    if isinstance(comfort, str):
+        if comfort == "budget":
+            out["comfort_level"] = "low"
+        elif comfort == "mid":
+            out["comfort_level"] = "medium"
+        else:
+            out["comfort_level"] = "high"
+
+    prefs = profile.get("preferences")
+    if isinstance(prefs, list):
+        allowed = {"history", "spiritual", "food", "walking", "markets"}
+        out["preferences"] = [p for p in prefs if isinstance(p, str) and p in allowed]
+    return out
+
+
+def export_plan(request: Request) -> JSONResponse:
+    session_id_value = request.query_params.get("session_id")
+    if not isinstance(session_id_value, str) or not session_id_value or session_id_value not in SESSIONS:
+        return JSONResponse({"ok": False, "error": "missing_session"}, status_code=400)
+
+    session = SESSIONS[session_id_value]
+    trip_state = session.get("trip_state") or {}
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else {}
+
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days_list = trip.get("days") if isinstance(trip, dict) else None
+    if not isinstance(days_list, list):
+        days_list = []
+
+    hotel = trip_state.get("hotel") if isinstance(trip_state, dict) else None
+    hotel_coords = None
+    if isinstance(hotel, dict):
+        hc = hotel.get("coordinates")
+        if isinstance(hc, list) and len(hc) == 2:
+            hotel_coords = hc
+
+    links: List[Dict[str, Any]] = []
+    for d in days_list:
+        if not isinstance(d, dict):
+            continue
+        if d.get("confirmed") is not True:
+            continue
+        day_index = d.get("dayIndex")
+        if not isinstance(day_index, int):
+            continue
+        visits = d.get("visits")
+        if not isinstance(visits, list) or len(visits) == 0:
+            continue
+
+        coords: List[List[float]] = []
+        if hotel_coords:
+            coords.append(hotel_coords)
+
+        for pid in visits[:2]:
+            place = PLACES.get(str(pid))
+            if not place:
+                continue
+            coords.append([float(place["lat"]), float(place["lng"])])
+
+        if len(coords) < 2:
+            continue
+        url = _google_maps_dir_link(coords)
+        if not url:
+            continue
+        links.append({"day": day_index, "url": url})
+
+    return JSONResponse({"ok": True, "days": len(days_list), "links": links})
+
+
 def index(request: Request) -> Response:
     return FileResponse(str(STATIC_DIR / "index.html"))
 
@@ -640,6 +1124,10 @@ def health(request: Request) -> JSONResponse:
 
 def pois(request: Request) -> JSONResponse:
     return JSONResponse(POIS)
+
+
+def places(request: Request) -> JSONResponse:
+    return JSONResponse({"places": list(PLACES.values())})
 
 
 async def chat(request: Request) -> JSONResponse:
@@ -665,10 +1153,181 @@ async def chat(request: Request) -> JSONResponse:
     trip_state = session["trip_state"]
     history: List[Dict[str, str]] = session["history"]
 
-    if message:
+    commands: List[Dict[str, Any]] = []
+
+    commands.append({"session.storePlaces": PLACES})
+
+    if message and trip_state.get("planning_permission") is True:
         _update_trip_profile_from_message(trip_state, message)
 
-    next_field = _next_profile_field(trip_state)
+    commands.append({"session.storeProfile": _export_user_profile(trip_state)})
+
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+    if isinstance(profile, dict):
+        td = profile.get("time_days")
+        if isinstance(td, int) and td > 0:
+            _ensure_trip_days(trip_state, min(td, 14))
+
+    if not message and not map_event:
+        intro = []
+        for pid in [
+            _place_id("Swayambhunath (Monkey Temple)"),
+            _place_id("Boudhanath Stupa"),
+            _place_id("Garden of Dreams"),
+        ]:
+            p = PLACES.get(pid)
+            if not p:
+                continue
+            intro.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
+        reply = (
+            "Namaste — I’m NomadAI, your Kathmandu-only travel companion.\n\n"
+            + "\n".join(intro[:3])
+            + "\n\nWould you like a personalized plan for Kathmandu?"
+        )
+        trip_state["ui_stage"] = "intro"
+        if trip_state.get("planning_permission") is None:
+            trip_state["planning_permission"] = None
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": ["Yes", "No"],
+            }
+        )
+
+    if message and trip_state.get("planning_permission") is None:
+        if _looks_like_yes(message):
+            trip_state["planning_permission"] = True
+            trip_state["ui_stage"] = "collect_profile"
+        elif _looks_like_no(message):
+            trip_state["planning_permission"] = False
+            trip_state["ui_stage"] = "inspiration"
+
+    if trip_state.get("planning_permission") is False:
+        if message and _looks_like_yes(message):
+            trip_state["planning_permission"] = True
+            trip_state["ui_stage"] = "collect_profile"
+        else:
+            picks = _candidate_pois(trip_state, limit=3)
+            lines = []
+            for p in picks:
+                lines.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
+            reply = "Here are a few Kathmandu ideas you can enjoy without over-planning:\n\n" + "\n".join(lines)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [p["name_en"] for p in picks],
+                }
+            )
+
+    if trip_state.get("planning_permission") is True and trip_state.get("ui_stage") == "day_confirm" and message:
+        day_index = _current_day_index(trip_state)
+        d = _find_day(trip_state, day_index)
+        if _looks_like_yes(message):
+            if trip_state.get("hotel") and isinstance(d.get("visits"), list) and 1 <= len(d.get("visits")) <= 2:
+                _confirm_day(trip_state, day_index)
+                commands.append({"session.confirmDay": day_index})
+                if _is_trip_complete(trip_state):
+                    commands.append({"ui.enableButton": "buildRoute"})
+                    reply = f"Saved. Day {day_index} is confirmed. Your trip is ready — you can now build routes."
+                    trip_state["ui_stage"] = "done"
+                    return JSONResponse(
+                        {
+                            "session_id": session_id,
+                            "message": reply,
+                            "reply": reply,
+                            "commands": commands,
+                            "trip_state": trip_state,
+                            "map_actions": _map_actions_from_state(trip_state),
+                            "suggestions": [],
+                        }
+                    )
+
+                next_day = _current_day_index(trip_state)
+                trip_state["ui_stage"] = "day_suggest"
+                picks = _candidate_pois(trip_state, limit=3)
+                reply = f"Saved. Day {day_index} is confirmed. For Day {next_day}, pick up to 2 visiting places (map clarity and comfort). Which place should we add first?"
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [p["name_en"] for p in picks],
+                    }
+                )
+        if _looks_like_no(message):
+            visits = d.get("visits")
+            if isinstance(visits, list):
+                for pid in visits:
+                    if isinstance(pid, str):
+                        commands.append({"map.removePin": pid})
+                d["visits"] = []
+            reply = f"No problem. For Day {day_index}, pick up to 2 visiting places (it keeps the map clear and the pace comfortable). Which place should we start with?"
+            trip_state["ui_stage"] = "day_suggest"
+            picks = _candidate_pois(trip_state, limit=3)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [p["name_en"] for p in picks],
+                }
+            )
+
+    stay_area = _maybe_extract_stay_area(message) if message else None
+    if trip_state.get("planning_permission") is True and stay_area:
+        poi = _find_poi_by_name(stay_area)
+        if not poi and stay_area.lower() in {"boudha", "bouddha", "boudhanath"}:
+            poi = _find_poi_by_name("Boudhanath Stupa")
+        if not poi and stay_area.lower() in {"durbar", "durbar square", "kathmandu durbar"}:
+            poi = _find_poi_by_name("Kathmandu Durbar Square")
+        if poi:
+            coords = list(poi.get("coordinates") or list(KATHMANDU_CENTER))
+            _set_hotel(trip_state, stay_area.title(), coords)
+            _set_map_view(trip_state, coords, zoom=14)
+            day_index = _current_day_index(trip_state)
+            d = _find_day(trip_state, day_index)
+            d["hotelPlaceId"] = "hotel"
+            commands.append({"map.addPin": {"id": "hotel", "lat": float(coords[0]), "lng": float(coords[1]), "type": "hotel", "color": "green", "label": stay_area.title()}})
+            commands.append({"map.zoomTo": {"lat": float(coords[0]), "lng": float(coords[1]), "zoom": 14}})
+            commands.append({"session.storeHotel": {"dayIndex": day_index, "placeId": "hotel", "name_en": stay_area.title(), "lat": float(coords[0]), "lng": float(coords[1])}})
+            trip_state["ui_stage"] = "day_suggest"
+
+            reply = "Perfect — I’ll treat that as your stay point (it becomes the start of each day’s route). Now, for Day 1, which place would you like to add first?"
+            picks = _candidate_pois(trip_state, limit=3)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [p["name_en"] for p in picks],
+                }
+            )
+
+    if _is_trip_complete(trip_state):
+        commands.append({"ui.enableButton": "buildRoute"})
+    if _is_trip_complete(trip_state) and trip_state.get("routes"):
+        commands.append({"ui.enableButton": "export"})
+
+    next_field = _next_profile_field(trip_state) if trip_state.get("planning_permission") is True else None
     next_question = _profile_question_for(next_field) if next_field else None
 
     if next_field and next_question:
@@ -680,46 +1339,58 @@ async def chat(request: Request) -> JSONResponse:
             asked.append(next_field)
 
     if message and _looks_like_off_topic(message):
+        reply = _fallback("off_topic")
         return JSONResponse(
             {
                 "session_id": session_id,
-                "reply": _fallback("off_topic"),
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
                 "trip_state": trip_state,
                 "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
+                "suggestions": [],
             }
         )
 
     if message and _looks_like_too_broad(message):
+        reply = _fallback("too_broad")
         return JSONResponse(
             {
                 "session_id": session_id,
-                "reply": _fallback("too_broad"),
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
                 "trip_state": trip_state,
                 "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
+                "suggestions": [],
             }
         )
 
     if message and _looks_like_exact_prices(message):
+        reply = _fallback("exact_prices")
         return JSONResponse(
             {
                 "session_id": session_id,
-                "reply": _fallback("exact_prices"),
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
                 "trip_state": trip_state,
                 "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
+                "suggestions": [],
             }
         )
 
     if message and _looks_like_change_of_mind(message):
+        reply = _fallback("changes_mind")
         return JSONResponse(
             {
                 "session_id": session_id,
-                "reply": _fallback("changes_mind"),
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
                 "trip_state": trip_state,
                 "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
+                "suggestions": [],
             }
         )
 
@@ -741,38 +1412,68 @@ async def chat(request: Request) -> JSONResponse:
                 coords = [KATHMANDU_CENTER[0], KATHMANDU_CENTER[1]]
 
             _upsert_selected_place(trip_state, name, coords)
+            _set_map_view(trip_state, coords, zoom=15)
             trip_state["stage"] = "exploring"
 
-            place_query = name
-            rag = _rag_text_for_query(place_query, top_k=2)
-
-            try:
-                messages = [
-                    {"role": "system", "content": _system_prompt()},
+            pid = _place_id(name)
+            day_index = _current_day_index(trip_state)
+            ok, reason = _add_visit_to_day(trip_state, day_index, pid)
+            if not ok and reason == "day_full":
+                reply = "For map clarity and comfort, I keep it to 2 visiting places per day. If you want, we can move this one to the next day."
+                picks = _candidate_pois(trip_state, limit=3)
+                return JSONResponse(
                     {
-                        "role": "user",
-                        "content": (
-                            f"TRIP STATE:\n{_compact_state(trip_state)}\n\n"
-                            + (f"RAG CONTEXT:\n{rag}\n\n" if rag else "")
-                            + f"Tell a short story (3–6 sentences) about {name} in Kathmandu. "
-                            "Keep it human, vivid, and calming."
-                        ),
-                    },
-                ]
-                reply = await _ollama_chat(messages)
-            except Exception:
-                if rag:
-                    reply = rag.split("\n", 1)[-1].strip()
-                else:
-                    reply = f"{name} is a beautiful stop in Kathmandu. Want to visit it in the morning for softer light, or later when it feels more alive?"
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [p["name_en"] for p in picks],
+                    }
+                )
+            place = PLACES.get(pid)
+            if place:
+                commands.append({"map.addPin": {"id": pid, "lat": place["lat"], "lng": place["lng"], "type": "visit", "color": "blue", "label": place["name_en"]}})
+                commands.append({"map.zoomTo": {"lat": place["lat"], "lng": place["lng"], "zoom": 15}})
+                commands.append({"ui.showImages": {"placeId": pid, "urls": place.get("images") or []}})
+                commands.append({"ui.showReview": {"placeId": pid, "review": str(place.get("review") or "")}})
+                commands.append({"session.addPlaceToDay": {"dayIndex": day_index, "placeId": pid}})
 
+            d = _find_day(trip_state, day_index)
+            visits = d.get("visits") if isinstance(d, dict) else None
+            if isinstance(visits, list) and len(visits) >= 2:
+                preview = _day_preview_text(trip_state, day_index) or ""
+                trip_state["ui_stage"] = "day_confirm"
+                reply = preview + "\n\nSave this as Day " + str(day_index) + "?"
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": ["Yes", "No"],
+                    }
+                )
+
+            trip_state["ui_stage"] = "day_suggest"
+            picks = _candidate_pois(trip_state, limit=3)
+            short_story = str(place.get("storyShort") or "").strip() if isinstance(place, dict) else ""
+            reply = (
+                (f"{place.get('name_en')}: {short_story}\n\n" if short_story and isinstance(place, dict) else "")
+                + f"I recommend max 2 visiting places per day (map clarity and comfort). Which second place should we add for Day {day_index}?"
+            )
             return JSONResponse(
                 {
                     "session_id": session_id,
+                    "message": reply,
                     "reply": reply,
+                    "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": _suggestions_for_state(trip_state),
+                    "suggestions": [p["name_en"] for p in picks],
                 }
             )
 
@@ -782,166 +1483,235 @@ async def chat(request: Request) -> JSONResponse:
             if not (isinstance(coords, list) and len(coords) == 2):
                 coords = [KATHMANDU_CENTER[0], KATHMANDU_CENTER[1]]
             _set_hotel(trip_state, name, coords)
+            _set_map_view(trip_state, coords, zoom=14)
             trip_state["stage"] = "exploring"
 
-            reply = "Got it — I’ll treat that as your stay point. Pick a place you’re curious about, and I’ll help you shape a gentle route."
+            day_index = _current_day_index(trip_state)
+            d = _find_day(trip_state, day_index)
+            d["hotelPlaceId"] = "hotel"
+
+            commands.append({"map.addPin": {"id": "hotel", "lat": float(coords[0]), "lng": float(coords[1]), "type": "hotel", "color": "green", "label": str(name)}})
+            commands.append({"map.zoomTo": {"lat": float(coords[0]), "lng": float(coords[1]), "zoom": 14}})
+            commands.append({"session.storeHotel": {"dayIndex": day_index, "placeId": "hotel", "name_en": str(name), "lat": float(coords[0]), "lng": float(coords[1])}})
+
+            trip_state["ui_stage"] = "day_suggest"
+            picks = _candidate_pois(trip_state, limit=3)
+            reply = "Perfect — I’ll treat that as your stay point (green pin). For Day 1, which place would you like to add first?"
             return JSONResponse(
                 {
                     "session_id": session_id,
+                    "message": reply,
                     "reply": reply,
+                    "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": _suggestions_for_state(trip_state),
+                    "suggestions": [p["name_en"] for p in picks],
                 }
             )
 
         if et == "create_route":
-            trip_state["routes"] = await _build_routes_osrm(trip_state)
+            trip_state["routes"] = await _build_routes_for_confirmed_days(trip_state)
             trip_state["stage"] = "planning" if trip_state.get("routes") else trip_state.get("stage", "exploring")
 
-            if not trip_state.get("hotel"):
-                reply = "Set your hotel or stay point first (right‑click the map), then I can connect it to your selected places."
-            elif not trip_state.get("selected_places"):
-                reply = "Select at least one place first, then I’ll connect your stay point into a simple route."
+            if not _is_trip_complete(trip_state):
+                reply = "Finish confirming your days first, then I can build clean routes for each day."
+            elif not trip_state.get("routes"):
+                reply = "I couldn’t build the route yet — please make sure each confirmed day has 1–2 visiting stops."
             else:
-                names = [p["name"] for p in trip_state.get("selected_places", [])]
-                reply = "Here’s a simple flow from where you’re staying:\nHotel → " + " → ".join(names)
+                commands.append({"ui.enableButton": "export"})
+                reply = "Done — your day-by-day routes are ready. You can now export each day to Google Maps."
 
             return JSONResponse(
                 {
                     "session_id": session_id,
+                    "message": reply,
                     "reply": reply,
+                    "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": _suggestions_for_state(trip_state),
+                    "suggestions": [],
                 }
             )
-
-    stay_area = _maybe_extract_stay_area(message) if message else None
-    if stay_area:
-        poi = _find_poi_by_name(stay_area)
-        if not poi and stay_area.lower() in {"boudha", "bouddha", "boudhanath"}:
-            poi = _find_poi_by_name("Boudhanath Stupa")
-        if not poi and stay_area.lower() in {"durbar", "durbar square", "kathmandu durbar"}:
-            poi = _find_poi_by_name("Kathmandu Durbar Square")
-        if poi:
-            _set_hotel(trip_state, stay_area.title(), list(poi["coordinates"]))
-            reply = "Perfect — I’ll use that as your stay area. Want a calm heritage morning, a temple circuit, or a food-and-markets walk?"
-            return JSONResponse(
-                {
-                    "session_id": session_id,
-                    "reply": reply,
-                    "trip_state": trip_state,
-                    "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": _suggestions_for_state(trip_state),
-                }
-            )
-
-    if message and _looks_like_build_route(message):
-        trip_state["routes"] = await _build_routes_osrm(trip_state)
-        trip_state["stage"] = "planning" if trip_state.get("routes") else trip_state.get("stage", "exploring")
-        if not trip_state.get("hotel"):
-            reply = "Tell me where you’re staying (e.g., ‘I’m staying in Thamel’) or right‑click the map to set your stay point."
-        elif not trip_state.get("selected_places"):
-            reply = "Pick 1–3 places first (click POI markers), then I’ll build a street route between them."
-        else:
-            names = [p["name"] for p in trip_state.get("selected_places", [])]
-            reply = "Great — I drew a street route:\nHotel → " + " → ".join(names)
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "reply": reply,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
-            }
-        )
 
     if message and _is_outside_kathmandu(message):
+        reply = _fallback("off_topic")
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": [],
+            }
+        )
+
+    if trip_state.get("planning_permission") is True:
+        day_index = _current_day_index(trip_state)
+        d = _find_day(trip_state, day_index)
+        visits = d.get("visits") if isinstance(d, dict) else None
+        if message and trip_state.get("ui_stage") == "day_suggest" and _looks_like_save_day(message):
+            if isinstance(visits, list) and 1 <= len(visits) <= 2:
+                preview = _day_preview_text(trip_state, day_index) or ""
+                trip_state["ui_stage"] = "day_confirm"
+                reply = preview + "\n\nSave this as Day " + str(day_index) + "?"
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": ["Yes", "No"],
+                    }
+                )
+
+        if next_field and next_question:
+            trip_state["ui_stage"] = "collect_profile"
+            reply = next_question
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [],
+                }
+            )
+
+        if not trip_state.get("hotel"):
+            trip_state["ui_stage"] = "collect_hotel"
+            reply = "Where are you staying in Kathmandu (an area is fine)? I ask because it becomes your starting point each day."
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
+                }
+            )
+
+        if d.get("confirmed") is True:
+            reply = f"Day {day_index} is already confirmed."
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [],
+                }
+            )
+
+        picks = _candidate_pois(trip_state, limit=3)
+        place_guess = _looks_like_place_name(message) if message else None
+        poi = _find_poi_by_name(place_guess) if place_guess else None
+        if not poi and place_guess:
+            poi = _find_poi_mention(place_guess)
+        if poi and trip_state.get("ui_stage") in {"day_suggest", "collect_hotel", "collect_profile", "intro"}:
+            name = str(poi.get("name", "Selected place"))
+            coords = poi.get("coordinates")
+            if not (isinstance(coords, list) and len(coords) == 2):
+                coords = [KATHMANDU_CENTER[0], KATHMANDU_CENTER[1]]
+            pid = _place_id(name)
+            ok, reason = _add_visit_to_day(trip_state, day_index, pid)
+            if not ok and reason == "day_full":
+                reply = "For map clarity and comfort, I keep it to 2 visiting places per day. If you want, we can move this one to the next day."
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [p["name_en"] for p in picks],
+                    }
+                )
+
+            _upsert_selected_place(trip_state, name, coords)
+            _set_map_view(trip_state, coords, zoom=15)
+            place = PLACES.get(pid)
+            if place:
+                commands.append({"map.addPin": {"id": pid, "lat": place["lat"], "lng": place["lng"], "type": "visit", "color": "blue", "label": place["name_en"]}})
+                commands.append({"map.zoomTo": {"lat": place["lat"], "lng": place["lng"], "zoom": 15}})
+                commands.append({"ui.showImages": {"placeId": pid, "urls": place.get("images") or []}})
+                commands.append({"ui.showReview": {"placeId": pid, "review": str(place.get("review") or "")}})
+                commands.append({"session.addPlaceToDay": {"dayIndex": day_index, "placeId": pid}})
+
+            d = _find_day(trip_state, day_index)
+            visits = d.get("visits") if isinstance(d, dict) else None
+            if isinstance(visits, list) and len(visits) >= 2:
+                preview = _day_preview_text(trip_state, day_index) or ""
+                trip_state["ui_stage"] = "day_confirm"
+                reply = preview + "\n\nSave this as Day " + str(day_index) + "?"
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": ["Yes", "No"],
+                    }
+                )
+
+            trip_state["ui_stage"] = "day_suggest"
+            remaining = _candidate_pois(trip_state, limit=3)
+            reply = f"Added {name}. I recommend max 2 visiting places per day (map clarity and comfort). Which second place should we add for Day {day_index}?"
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [p["name_en"] for p in remaining] + [f"Save Day {day_index}"],
+                }
+            )
+
+        trip_state["ui_stage"] = "day_suggest"
+        lines = []
+        for p in picks:
+            lines.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
         reply = (
-            "I know Kathmandu Valley best — Kathmandu, Patan, Bhaktapur, and the nearby hills — so I can guide you with real detail there. "
-            "If you tell me your vibe (quiet, culture, food, or viewpoints), I’ll suggest 2–3 places that fit and explain why."
+            f"For Day {day_index}, here are 2–3 great Kathmandu choices. I recommend max 2 visiting places per day (map clarity and comfort).\n\n"
+            + "\n".join(lines)
+            + "\n\nWhich one would you like to add first?"
         )
         return JSONResponse(
             {
                 "session_id": session_id,
+                "message": reply,
                 "reply": reply,
+                "commands": commands,
                 "trip_state": trip_state,
                 "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": _suggestions_for_state(trip_state),
+                "suggestions": [p["name_en"] for p in picks],
             }
         )
 
-    try:
-        rag = _rag_text_for_query(message, top_k=3) if message else ""
-
-        if not message:
-            user_text = (
-                "Introduce yourself as Aarav, a local guide from Kathmandu Valley. Start with 2–3 calm, lived-in suggestions (Kathmandu/Patan/Bhaktapur/nearby). "
-                "Ask for permission before planning. Ask at most one gentle question, and explain why you’re asking it."
-            )
-        else:
-            user_text = message
-
-        profile = trip_state.get("trip_profile")
-        if not isinstance(profile, dict):
-            profile = {}
-
-        planning_instruction = (
-            "\n\n"
-            "TRIP PROFILE (structured, may be incomplete):\n"
-            f"{json.dumps(profile, ensure_ascii=False)}\n"
-            "Guidance: Provide value first (2–3 places max) with a calm, lived-in reason for each. "
-            "Do not ask back-to-back questions. "
-        )
-        if next_question:
-            planning_instruction += (
-                "End with exactly one gentle follow-up question (and explain why you’re asking it) using this wording:\n"
-                f"{next_question}"
-            )
-
-        messages = [{"role": "system", "content": _system_prompt()}]
-        messages.extend(history[-8:])
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"TRIP STATE:\n{_compact_state(trip_state)}\n\n"
-                    + (f"RAG CONTEXT:\n{rag}\n\n" if rag else "")
-                    + user_text
-                    + planning_instruction
-                ),
-            }
-        )
-
-        reply = await _ollama_chat(messages)
-        if message:
-            history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": reply})
-        if len(history) > 24:
-            session["history"] = history[-24:]
-    except Exception:
-        if not message:
-            reply = (
-                "Namaste — I’m Aarav. Kathmandu Valley can feel like a small maze at first, but it’s a gentle one once you find your rhythm. "
-                "If you’d like, I can suggest 2–3 places to start — are you looking for something calm, cultural, or food-focused?"
-            )
-        else:
-            if _looks_like_vague_or_confused(message):
-                reply = _fallback("vague")
-            else:
-                reply = (
-                    "I’m with you. Let’s keep this simple and flexible for now. "
-                    "Tell me what kind of day you want in the Valley — quiet courtyards, busy old streets, temples, or viewpoints?"
-                )
-
+    reply = _fallback("vague")
     return JSONResponse(
         {
             "session_id": session_id,
+            "message": reply,
             "reply": reply,
+            "commands": commands,
             "trip_state": trip_state,
             "map_actions": _map_actions_from_state(trip_state),
-            "suggestions": _suggestions_for_state(trip_state),
+            "suggestions": [],
         }
     )
 
@@ -950,7 +1720,9 @@ routes = [
     Route("/", endpoint=index, methods=["GET"]),
     Route("/api/health", endpoint=health, methods=["GET"]),
     Route("/api/pois", endpoint=pois, methods=["GET"]),
+    Route("/api/places", endpoint=places, methods=["GET"]),
     Route("/api/chat", endpoint=chat, methods=["POST"]),
+    Route("/api/export", endpoint=export_plan, methods=["GET"]),
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 

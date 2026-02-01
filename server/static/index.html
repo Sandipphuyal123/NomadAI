@@ -3,32 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kathmandu Travel Companion</title>
+    <meta name="description" content="NomadAI - Your smart travel companion for exploring Kathmandu Valley with AI-powered local guidance." />
+    <meta name="keywords" content="travel, AI, Kathmandu, Nepal, tourism, local guide" />
+    <meta name="author" content="NomadAI" />
+    <title>NomadAI - Your Smart Travel Companion</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='grad' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%236366f1;stop-opacity:1' /%3E%3Cstop offset='100%25' style='stop-color:%238b5cf6;stop-opacity:1' /%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='45' fill='url(%23grad)' /%3E%3Cpath d='M50 20 L60 40 L80 40 L65 55 L70 75 L50 60 L30 75 L35 55 L20 40 L40 40 Z' fill='white' /%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="app">
-      <div class="topbar">
-        <div class="title">Kathmandu Travel Companion</div>
-        <div class="controls">
-          <button id="btnRoute" class="btn">Build route</button>
-          <button id="btnReset" class="btn btnGhost">Reset</button>
-        </div>
-      </div>
-
       <div class="content">
         <div id="map" class="map"></div>
 
         <div class="chat">
+          <div class="chatHeader">
+            <div class="title">NomadAI</div>
+            <div class="controls">
+              <button id="btnRoute" class="btn" disabled>Build route</button>
+              <button id="btnExport" class="btn btnGhost" disabled>Export</button>
+              <button id="btnReset" class="btn btnGhost">Reset</button>
+            </div>
+          </div>
           <div id="chatLog" class="chatLog"></div>
           <form id="chatForm" class="chatForm">
             <input id="chatInput" class="chatInput" placeholder="Ask about Kathmandu…" autocomplete="off" />
             <button class="btn" type="submit">Send</button>
           </form>
           <div id="suggestions" class="suggestions"></div>
+          <div class="export">
+            <div class="exportHeader">
+              <div class="exportTitle">Export to Google Maps</div>
+            </div>
+            <div id="exportLinks" class="exportLinks"></div>
+          </div>
           <div class="hint">
-            Tip: click markers to select places. Right‑click the map to set your stay point.
+            💡 <strong>Tip:</strong> Click map markers to select places • Right-click to set your hotel • Say "I like [place name]" in chat to add locations
           </div>
         </div>
       </div>
