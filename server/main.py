@@ -16,6 +16,11 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+# Import budget estimator
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from budget_estimator import estimate_trip_budget, format_budget_summary
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
@@ -488,10 +493,14 @@ def _find_poi_by_name(name: str) -> Optional[Dict[str, Any]]:
 def _maybe_extract_stay_area(message: str) -> Optional[str]:
     m = message.strip().lower()
     patterns = [
-        r"^i\s*['’]?m\s+staying\s+(?:in|near)\s+(.+)$",
+        r"^i\s*['']?m\s+staying\s+(?:in|near)\s+(.+)$",
         r"^i\s+am\s+staying\s+(?:in|near)\s+(.+)$",
         r"^staying\s+(?:in|near)\s+(.+)$",
         r"^my\s+hotel\s+is\s+(?:in|near)\s+(.+)$",
+        # More flexible patterns
+        r"^(?:in|near)\s+(.+)$",
+        r"^(.+)\s+area$",
+        r"^(thamel|boudha|durbar|durbar square|kathmandu durbar)$",
     ]
     for pat in patterns:
         mm = re.match(pat, m)
@@ -584,16 +593,26 @@ def _looks_like_change_of_mind(message: str) -> bool:
 
 def _parse_time_days(message: str) -> Optional[int]:
     m = message.strip().lower()
+    
+    # First try to find "X days" pattern
     mm = re.search(r"\b(\d{1,2})\s*(day|days|week|weeks)\b", m)
-    if not mm:
-        return None
-    n = int(mm.group(1))
-    unit = mm.group(2)
-    if unit.startswith("week"):
-        n *= 7
-    if n <= 0:
-        return None
-    return n
+    if mm:
+        n = int(mm.group(1))
+        unit = mm.group(2)
+        if unit.startswith("week"):
+            n *= 7
+        if n <= 0:
+            return None
+        return n
+    
+    # If no "days" word, try standalone number (common user input)
+    mm = re.search(r"^\s*(\d{1,2})\s*$", m)
+    if mm:
+        n = int(mm.group(1))
+        if 1 <= n <= 14:  # Reasonable range for trip days
+            return n
+    
+    return None
 
 
 def _parse_group(message: str) -> Optional[Dict[str, Any]]:
@@ -911,9 +930,9 @@ def _suggestions_for_state(trip_state: Dict[str, Any]) -> List[str]:
                         planned_ids.add(pid)
 
     if not trip_state.get("hotel"):
-        suggestions.append("I'm staying in Thamel")
-        suggestions.append("I'm staying near Boudha")
-        suggestions.append("I'm staying near Durbar Square")
+        suggestions.append("Thamel – lively, tourist-friendly")
+        suggestions.append("Near Boudha – calm, spiritual")
+        suggestions.append("Near Durbar Square – historic")
 
     if not trip_state.get("selected_places"):
         for p in POIS:
@@ -1313,7 +1332,15 @@ async def chat(request: Request) -> JSONResponse:
                 commands.append({"session.confirmDay": day_index})
                 if _is_trip_complete(trip_state):
                     commands.append({"ui.enableButton": "buildRoute"})
-                    reply = _final_trip_summary(trip_state)
+                    
+                    # Add budget summary
+                    try:
+                        budget_data = estimate_trip_budget(trip_state)
+                        budget_summary = format_budget_summary(budget_data)
+                        reply = f"All your planned days are complete!\n\n{budget_summary}\n\nYou can now build routes or export to Google Maps."
+                    except Exception:
+                        reply = "All your planned days are complete! You can now build routes or export to Google Maps."
+                    
                     trip_state["ui_stage"] = "done"
                     return JSONResponse(
                         {
@@ -1333,7 +1360,15 @@ async def chat(request: Request) -> JSONResponse:
                     stay_days = trip_state["trip_profile"].get("time_days")
                 if isinstance(stay_days, int) and next_day > stay_days:
                     commands.append({"ui.enableButton": "buildRoute"})
-                    reply = f"All your {stay_days} days are planned. You can build routes now."
+                    
+                    # Add budget summary
+                    try:
+                        budget_data = estimate_trip_budget(trip_state)
+                        budget_summary = format_budget_summary(budget_data)
+                        reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can build routes now."
+                    except Exception:
+                        reply = f"All your {stay_days} days are planned. You can build routes now."
+                    
                     trip_state["ui_stage"] = "done"
                     return JSONResponse(
                         {
@@ -1349,7 +1384,26 @@ async def chat(request: Request) -> JSONResponse:
 
                 trip_state["ui_stage"] = "day_suggest"
                 picks = _candidate_pois(trip_state, limit=3)
-                reply = f"Day {day_index} saved. For Day {next_day}, pick up to 2 places. Which first?"
+                
+                # Check if we've reached the planned number of days
+                stay_days = None
+                if isinstance(trip_state.get("trip_profile"), dict):
+                    stay_days = trip_state["trip_profile"].get("time_days")
+                
+                if isinstance(stay_days, int) and next_day > stay_days:
+                    commands.append({"ui.enableButton": "buildRoute"})
+                    
+                    # Add budget summary
+                    try:
+                        budget_data = estimate_trip_budget(trip_state)
+                        budget_summary = format_budget_summary(budget_data)
+                        reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can now build routes or export to Google Maps."
+                    except Exception:
+                        reply = f"All your {stay_days} days are planned! You can now build routes or export to Google Maps."
+                    
+                    trip_state["ui_stage"] = "done"
+                else:
+                    reply = f"Day {day_index} saved. For Day {next_day}, pick up to 2 places. Which first?"
                 return JSONResponse(
                     {
                         "session_id": session_id,
@@ -1402,7 +1456,23 @@ async def chat(request: Request) -> JSONResponse:
             commands.append({"session.storeHotel": {"dayIndex": day_index, "placeId": "hotel", "name_en": stay_area.title(), "lat": float(coords[0]), "lng": float(coords[1])}})
             trip_state["ui_stage"] = "day_suggest"
 
-            reply = "Perfect — I’ll treat that as your stay point (it becomes the start of each day’s route). Now, for Day 1, which place would you like to add first?"
+            area_descriptions = {
+                "thamel": "Good choice. Thamel means lively streets, easy transport, and lots of restaurants. Perfect for first-time visitors.",
+                "boudha": "Perfect choice. Staying near Boudha means quieter mornings, easy access to sacred sites, and less traffic stress.",
+                "durbar": "Great pick. Near Durbar Square puts you in the heart of old Kathmandu with history at your doorstep."
+            }
+            
+            area_key = stay_area.lower()
+            if "boudha" in area_key:
+                area_key = "boudha"
+            elif "durbar" in area_key:
+                area_key = "durbar"
+            elif "thamel" in area_key:
+                area_key = "thamel"
+            
+            explanation = area_descriptions.get(area_key, f"Perfect — I'll treat {stay_area.title()} as your starting point each day.")
+            
+            reply = f"{explanation} I'll lock this as your stay area and use it as your starting point each day. Now, for Day 1, which place would you like to add first?"
             picks = _candidate_pois(trip_state, limit=3)
             return JSONResponse(
                 {
@@ -1648,7 +1718,15 @@ async def chat(request: Request) -> JSONResponse:
             stay_days = trip_state["trip_profile"].get("time_days")
         if isinstance(stay_days, int) and day_index > stay_days and _has_buildable_trip(trip_state):
             commands.append({"ui.enableButton": "buildRoute"})
-            reply = f"All your {stay_days} days are planned. You can build routes now."
+            
+            # Add budget summary
+            try:
+                budget_data = estimate_trip_budget(trip_state)
+                budget_summary = format_budget_summary(budget_data)
+                reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can build routes now."
+            except Exception:
+                reply = f"All your {stay_days} days are planned. You can build routes now."
+            
             trip_state["ui_stage"] = "done"
             return JSONResponse(
                 {
@@ -1707,7 +1785,7 @@ async def chat(request: Request) -> JSONResponse:
                     "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
+                    "suggestions": ["Thamel – lively, tourist-friendly", "Near Boudha – calm, spiritual", "Near Durbar Square – historic"],
                 }
             )
 
