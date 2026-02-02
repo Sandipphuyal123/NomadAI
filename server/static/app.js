@@ -420,7 +420,7 @@ btnReset.addEventListener('click', resetSession);
 if (btnExport) btnExport.addEventListener('click', exportToGoogleMaps);
 
 map.on('contextmenu', async (e) => {
-  await setHotel(e.latlng);
+  addMsg('assistant', "To set your stay point, please choose an area in chat (Thamel / Near Boudha / Near Durbar Square)." );
 });
 
 bootHello();

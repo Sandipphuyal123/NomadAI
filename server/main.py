@@ -16,11 +16,6 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-# Import budget estimator
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from budget_estimator import estimate_trip_budget, format_budget_summary
-
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
@@ -395,6 +390,144 @@ async def _maybe_llm_reply(
     return fallback
 
 
+async def _handle_completed_trip_questions(trip_state: Dict[str, Any], message: str, fallback: str) -> str:
+    """Handle questions about completed trips using LLM context."""
+    try:
+        # Check for specific question types
+        msg_lower = message.lower().strip()
+        
+        # Trip summary questions
+        if any(k in msg_lower for k in ["tell me about", "what places", "where are we going", "summary", "planned places"]):
+            return await _generate_trip_summary(trip_state)
+        
+        # Budget questions
+        if any(k in msg_lower for k in ["money", "budget", "cost", "how much", "price"]):
+            return await _generate_budget_estimate(trip_state)
+        
+        # Modification questions
+        if any(k in msg_lower for k in ["modify", "change", "edit", "add", "remove", "different"]):
+            return await _handle_trip_modification_request(trip_state, message)
+        
+        # Use LLM for other questions with full context
+        context = _context_for_llm(trip_state) + "\n\nThe user has completed their trip planning and is asking questions about their planned itinerary."
+        system = (
+            "You are NomadAI, a Kathmandu travel guide. The user has completed their trip planning. "
+            "Answer their questions about their planned trip. Be helpful and specific about their itinerary. "
+            "If they want to modify, explain what's possible.\n\nCurrent context: " + context
+        )
+        
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": message or "What next?"},
+        ]
+        reply = await _ollama_chat(messages)
+        if reply and len(reply.strip()) > 5:
+            return reply.strip()[:500]
+    except Exception:
+        pass
+    return fallback
+
+
+async def _generate_trip_summary(trip_state: Dict[str, Any]) -> str:
+    """Generate a summary of all planned places."""
+    try:
+        trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+        days = trip.get("days") if isinstance(trip, dict) else None
+        
+        if not isinstance(days, list) or not days:
+            return "I don't see any planned days yet."
+        
+        summary_parts = []
+        for day in days:
+            if isinstance(day, dict) and day.get("confirmed") is True:
+                day_index = day.get("dayIndex", "?")
+                visits = day.get("visits") if isinstance(day, dict) else []
+                
+                if isinstance(visits, list) and visits:
+                    place_names = []
+                    for visit_id in visits:
+                        if isinstance(visit_id, str):
+                            place = PLACES.get(visit_id)
+                            if place and place.get("name_en"):
+                                place_names.append(place["name_en"])
+                    
+                    if place_names:
+                        summary_parts.append(f"Day {day_index}: {', '.join(place_names)}")
+        
+        if summary_parts:
+            return "Here's your planned itinerary:\n\n" + "\n".join(summary_parts) + "\n\nAll places are selected based on your preferences for history and temples."
+        else:
+            return "I don't see any confirmed days with places yet."
+    except Exception:
+        return "I had trouble generating your trip summary. Let me try a different approach."
+
+
+async def _generate_budget_estimate(trip_state: Dict[str, Any]) -> str:
+    """Generate a budget estimate for the planned trip."""
+    try:
+        trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+        days = trip.get("days") if isinstance(trip, dict) else None
+        profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+        comfort = profile.get("comfort") if isinstance(profile, dict) else "mid-range"
+        
+        if not isinstance(days, list) or not days:
+            return "I don't see any planned days to estimate costs for."
+        
+        # Count confirmed places
+        total_places = 0
+        confirmed_days = 0
+        for day in days:
+            if isinstance(day, dict) and day.get("confirmed") is True:
+                confirmed_days += 1
+                visits = day.get("visits") if isinstance(day, dict) else []
+                if isinstance(visits, list):
+                    total_places += len(visits)
+        
+        if total_places == 0:
+            return "I don't see any confirmed places to estimate costs for."
+        
+        # Estimate based on comfort level
+        if comfort.lower() in ["comfortable", "more comfortable"]:
+            daily_range = "2000-4000 NPR"
+            total_range = f"{confirmed_days * 2000}-{confirmed_days * 4000} NPR"
+        elif comfort.lower() in ["budget", "flexible"]:
+            daily_range = "1000-2500 NPR"
+            total_range = f"{confirmed_days * 1000}-{confirmed_days * 2500} NPR"
+        else:
+            daily_range = "1500-3000 NPR"
+            total_range = f"{confirmed_days * 1500}-{confirmed_days * 3000} NPR"
+        
+        return (f"Based on your {comfort} preferences and {confirmed_days} confirmed days with {total_places} places:\n\n"
+                f"Daily estimate: {daily_range} (including entry fees, transport, meals)\n"
+                f"Total trip estimate: {total_range}\n\n"
+                f"Note: This is a rough estimate. Actual costs vary based on your choices, current prices, and personal spending habits.")
+    except Exception:
+        return "I had trouble estimating your budget. Costs vary widely depending on your choices - from budget-friendly local options to more comfortable tourist services."
+
+
+async def _handle_trip_modification_request(trip_state: Dict[str, Any], message: str) -> str:
+    """Handle requests to modify the trip."""
+    try:
+        msg_lower = message.lower().strip()
+        
+        # Check if user wants to add a place
+        if any(k in msg_lower for k in ["add", "include", "visit"]):
+            return "I can help you add places! Just tell me which place you'd like to add, and I'll suggest the best day for it. For example: 'Add Patan Durbar Square' or 'I want to visit Swayambhunath'."
+        
+        # Check if user wants to remove a place
+        if any(k in msg_lower for k in ["remove", "delete", "skip", "don't"]):
+            return "I can help you remove places! Just tell me which place you'd like to remove from your itinerary. For example: 'Remove Thamel' or 'I don't want to visit Pashupatinath'."
+        
+        # Check if user wants to change days
+        if any(k in msg_lower for k in ["change day", "different day", "move", "swap"]):
+            return "I can help you move places between days! Just tell me which place to move and to which day. For example: 'Move Garden of Dreams to Day 2' or 'Swap Day 1 and Day 2'."
+        
+        # General modification request
+        return "I can help you modify your trip in several ways:\n\n• Add new places to specific days\n• Remove places you don't want\n• Move places between days\n• Adjust your itinerary\n\nJust tell me what you'd like to change!"
+    except Exception:
+        return "I can help you modify your trip! Let me know what changes you'd like to make to your itinerary."
+
+
 def _system_prompt() -> str:
     return (
         "\n".join(
@@ -493,14 +626,10 @@ def _find_poi_by_name(name: str) -> Optional[Dict[str, Any]]:
 def _maybe_extract_stay_area(message: str) -> Optional[str]:
     m = message.strip().lower()
     patterns = [
-        r"^i\s*['']?m\s+staying\s+(?:in|near)\s+(.+)$",
+        r"^i\s*['’]?m\s+staying\s+(?:in|near)\s+(.+)$",
         r"^i\s+am\s+staying\s+(?:in|near)\s+(.+)$",
         r"^staying\s+(?:in|near)\s+(.+)$",
         r"^my\s+hotel\s+is\s+(?:in|near)\s+(.+)$",
-        # More flexible patterns
-        r"^(?:in|near)\s+(.+)$",
-        r"^(.+)\s+area$",
-        r"^(thamel|boudha|durbar|durbar square|kathmandu durbar)$",
     ]
     for pat in patterns:
         mm = re.match(pat, m)
@@ -556,7 +685,6 @@ def _looks_like_exact_prices(message: str) -> bool:
 def _looks_like_off_topic(message: str) -> bool:
     m = message.strip().lower()
     # Use word boundaries to avoid false positives like "family" containing "ai"
-    import re
     patterns = [
         r'\bai\b',
         r'\bllm\b',
@@ -593,26 +721,22 @@ def _looks_like_change_of_mind(message: str) -> bool:
 
 def _parse_time_days(message: str) -> Optional[int]:
     m = message.strip().lower()
-    
-    # First try to find "X days" pattern
-    mm = re.search(r"\b(\d{1,2})\s*(day|days|week|weeks)\b", m)
-    if mm:
-        n = int(mm.group(1))
-        unit = mm.group(2)
-        if unit.startswith("week"):
-            n *= 7
-        if n <= 0:
-            return None
-        return n
-    
-    # If no "days" word, try standalone number (common user input)
-    mm = re.search(r"^\s*(\d{1,2})\s*$", m)
-    if mm:
-        n = int(mm.group(1))
-        if 1 <= n <= 14:  # Reasonable range for trip days
+    # Common UX: user answers with a bare number (e.g. "2") when asked "How many days?"
+    # We accept that as "N days" (with a small sanity bound).
+    if re.fullmatch(r"\d{1,2}", m):
+        n = int(m)
+        if 1 <= n <= 14:
             return n
-    
-    return None
+    mm = re.search(r"\b(\d{1,2})\s*(day|days|week|weeks)\b", m)
+    if not mm:
+        return None
+    n = int(mm.group(1))
+    unit = mm.group(2)
+    if unit.startswith("week"):
+        n *= 7
+    if n <= 0:
+        return None
+    return n
 
 
 def _parse_group(message: str) -> Optional[Dict[str, Any]]:
@@ -930,9 +1054,9 @@ def _suggestions_for_state(trip_state: Dict[str, Any]) -> List[str]:
                         planned_ids.add(pid)
 
     if not trip_state.get("hotel"):
-        suggestions.append("Thamel – lively, tourist-friendly")
-        suggestions.append("Near Boudha – calm, spiritual")
-        suggestions.append("Near Durbar Square – historic")
+        suggestions.append("I'm staying in Thamel")
+        suggestions.append("I'm staying near Boudha")
+        suggestions.append("I'm staying near Durbar Square")
 
     if not trip_state.get("selected_places"):
         for p in POIS:
@@ -1332,15 +1456,7 @@ async def chat(request: Request) -> JSONResponse:
                 commands.append({"session.confirmDay": day_index})
                 if _is_trip_complete(trip_state):
                     commands.append({"ui.enableButton": "buildRoute"})
-                    
-                    # Add budget summary
-                    try:
-                        budget_data = estimate_trip_budget(trip_state)
-                        budget_summary = format_budget_summary(budget_data)
-                        reply = f"All your planned days are complete!\n\n{budget_summary}\n\nYou can now build routes or export to Google Maps."
-                    except Exception:
-                        reply = "All your planned days are complete! You can now build routes or export to Google Maps."
-                    
+                    reply = _final_trip_summary(trip_state)
                     trip_state["ui_stage"] = "done"
                     return JSONResponse(
                         {
@@ -1358,18 +1474,11 @@ async def chat(request: Request) -> JSONResponse:
                 stay_days = None
                 if isinstance(trip_state.get("trip_profile"), dict):
                     stay_days = trip_state["trip_profile"].get("time_days")
+                
+                # Check if we've completed all planned days
                 if isinstance(stay_days, int) and next_day > stay_days:
                     commands.append({"ui.enableButton": "buildRoute"})
-                    
-                    # Add budget summary
-                    try:
-                        budget_data = estimate_trip_budget(trip_state)
-                        budget_summary = format_budget_summary(budget_data)
-                        reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can build routes now."
-                    except Exception:
-                        reply = f"All your {stay_days} days are planned. You can build routes now."
-                    
-                    trip_state["ui_stage"] = "done"
+                    reply = f"All your {stay_days} days are planned. You can build routes now or ask me questions about your trip."
                     return JSONResponse(
                         {
                             "session_id": session_id,
@@ -1378,32 +1487,13 @@ async def chat(request: Request) -> JSONResponse:
                             "commands": commands,
                             "trip_state": trip_state,
                             "map_actions": _map_actions_from_state(trip_state),
-                            "suggestions": [],
+                            "suggestions": ["Tell me about my planned places", "How much money should I bring?", "Can I modify my trip?"],
                         }
                     )
 
                 trip_state["ui_stage"] = "day_suggest"
                 picks = _candidate_pois(trip_state, limit=3)
-                
-                # Check if we've reached the planned number of days
-                stay_days = None
-                if isinstance(trip_state.get("trip_profile"), dict):
-                    stay_days = trip_state["trip_profile"].get("time_days")
-                
-                if isinstance(stay_days, int) and next_day > stay_days:
-                    commands.append({"ui.enableButton": "buildRoute"})
-                    
-                    # Add budget summary
-                    try:
-                        budget_data = estimate_trip_budget(trip_state)
-                        budget_summary = format_budget_summary(budget_data)
-                        reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can now build routes or export to Google Maps."
-                    except Exception:
-                        reply = f"All your {stay_days} days are planned! You can now build routes or export to Google Maps."
-                    
-                    trip_state["ui_stage"] = "done"
-                else:
-                    reply = f"Day {day_index} saved. For Day {next_day}, pick up to 2 places. Which first?"
+                reply = f"Day {day_index} saved. For Day {next_day}, pick up to 2 places. Which first?"
                 return JSONResponse(
                     {
                         "session_id": session_id,
@@ -1456,23 +1546,7 @@ async def chat(request: Request) -> JSONResponse:
             commands.append({"session.storeHotel": {"dayIndex": day_index, "placeId": "hotel", "name_en": stay_area.title(), "lat": float(coords[0]), "lng": float(coords[1])}})
             trip_state["ui_stage"] = "day_suggest"
 
-            area_descriptions = {
-                "thamel": "Good choice. Thamel means lively streets, easy transport, and lots of restaurants. Perfect for first-time visitors.",
-                "boudha": "Perfect choice. Staying near Boudha means quieter mornings, easy access to sacred sites, and less traffic stress.",
-                "durbar": "Great pick. Near Durbar Square puts you in the heart of old Kathmandu with history at your doorstep."
-            }
-            
-            area_key = stay_area.lower()
-            if "boudha" in area_key:
-                area_key = "boudha"
-            elif "durbar" in area_key:
-                area_key = "durbar"
-            elif "thamel" in area_key:
-                area_key = "thamel"
-            
-            explanation = area_descriptions.get(area_key, f"Perfect — I'll treat {stay_area.title()} as your starting point each day.")
-            
-            reply = f"{explanation} I'll lock this as your stay area and use it as your starting point each day. Now, for Day 1, which place would you like to add first?"
+            reply = "Perfect — I’ll treat that as your stay point (it becomes the start of each day’s route). Now, for Day 1, which place would you like to add first?"
             picks = _candidate_pois(trip_state, limit=3)
             return JSONResponse(
                 {
@@ -1642,25 +1716,10 @@ async def chat(request: Request) -> JSONResponse:
             )
 
         if et == "set_hotel":
-            name = str(map_event.get("name", "")) or "Stay"
-            coords = map_event.get("coordinates")
-            if not (isinstance(coords, list) and len(coords) == 2):
-                coords = [KATHMANDU_CENTER[0], KATHMANDU_CENTER[1]]
-            _set_hotel(trip_state, name, coords)
-            _set_map_view(trip_state, coords, zoom=14)
-            trip_state["stage"] = "exploring"
-
-            day_index = _current_day_index(trip_state)
-            d = _find_day(trip_state, day_index)
-            d["hotelPlaceId"] = "hotel"
-
-            commands.append({"map.addPin": {"id": "hotel", "lat": float(coords[0]), "lng": float(coords[1]), "type": "hotel", "color": "green", "label": str(name)}})
-            commands.append({"map.zoomTo": {"lat": float(coords[0]), "lng": float(coords[1]), "zoom": 14}})
-            commands.append({"session.storeHotel": {"dayIndex": day_index, "placeId": "hotel", "name_en": str(name), "lat": float(coords[0]), "lng": float(coords[1])}})
-
-            trip_state["ui_stage"] = "day_suggest"
-            picks = _candidate_pois(trip_state, limit=3)
-            reply = "Perfect — I’ll treat that as your stay point (green pin). For Day 1, which place would you like to add first?"
+            reply = (
+                "For this prototype, please choose your stay area in chat (Thamel / Near Boudha / Near Durbar Square). "
+                "Once you pick one, I’ll set it as your start point (green pin)."
+            )
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1669,7 +1728,7 @@ async def chat(request: Request) -> JSONResponse:
                     "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": [p["name_en"] for p in picks],
+                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
                 }
             )
 
@@ -1711,6 +1770,29 @@ async def chat(request: Request) -> JSONResponse:
             }
         )
 
+    # Handle completed trip questions first, regardless of UI stage
+    if (trip_state.get("planning_permission") is True and 
+        trip_state.get("ui_stage") == "done" and 
+        message and 
+        _has_buildable_trip(trip_state)):
+        
+        reply = await _handle_completed_trip_questions(trip_state, message, fallback="Your trip is all planned! You can build routes or ask me about your itinerary.")
+        commands.append({"ui.enableButton": "buildRoute"})
+        if _is_trip_complete(trip_state) and trip_state.get("routes"):
+            commands.append({"ui.enableButton": "export"})
+        
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": ["Tell me about my planned places", "How much money should I bring?", "Can I modify my trip?"],
+            }
+        )
+
     if trip_state.get("planning_permission") is True:
         day_index = _current_day_index(trip_state)
         stay_days = None
@@ -1718,16 +1800,11 @@ async def chat(request: Request) -> JSONResponse:
             stay_days = trip_state["trip_profile"].get("time_days")
         if isinstance(stay_days, int) and day_index > stay_days and _has_buildable_trip(trip_state):
             commands.append({"ui.enableButton": "buildRoute"})
-            
-            # Add budget summary
-            try:
-                budget_data = estimate_trip_budget(trip_state)
-                budget_summary = format_budget_summary(budget_data)
-                reply = f"All your {stay_days} days are planned!\n\n{budget_summary}\n\nYou can build routes now."
-            except Exception:
-                reply = f"All your {stay_days} days are planned. You can build routes now."
-            
-            trip_state["ui_stage"] = "done"
+            # Don't set ui_stage to "done" immediately - allow questions
+            if trip_state.get("ui_stage") != "done":
+                reply = f"All your {stay_days} days are planned. You can build routes now or ask me questions about your trip."
+            else:
+                reply = await _handle_completed_trip_questions(trip_state, message, fallback=f"All your {stay_days} days are planned. You can build routes now or ask me about your trip.")
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1736,7 +1813,7 @@ async def chat(request: Request) -> JSONResponse:
                     "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": [],
+                    "suggestions": ["Tell me about my planned places", "How much money should I bring?", "Can I modify my trip?"],
                 }
             )
 
@@ -1761,7 +1838,26 @@ async def chat(request: Request) -> JSONResponse:
 
         if next_field and next_question:
             trip_state["ui_stage"] = "collect_profile"
-            reply = next_question
+            # If the user asked something "curious" instead of answering the missing field,
+            # answer briefly (LLM if available) then continue the required question.
+            profile_now = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+            field_still_missing = True
+            if isinstance(profile_now, dict):
+                if next_field == "time_days" and isinstance(profile_now.get("time_days"), int):
+                    field_still_missing = False
+                elif next_field != "time_days" and profile_now.get(next_field):
+                    field_still_missing = False
+
+            if message and field_still_missing:
+                answered = await _maybe_llm_reply(
+                    trip_state,
+                    message,
+                    "I can help with that. "+next_question,
+                )
+                reply = answered.rstrip() + "\n\n" + next_question
+            else:
+                reply = next_question
+
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1776,7 +1872,12 @@ async def chat(request: Request) -> JSONResponse:
 
         if not trip_state.get("hotel"):
             trip_state["ui_stage"] = "collect_hotel"
-            reply = "Where are you staying in Kathmandu? (Area is fine — it's your starting point each day.)"
+            reply = (
+                "Before we plan days, pick where you’ll stay (it becomes your starting point each day):\n"
+                "- Thamel — lively, tourist-friendly\n"
+                "- Near Boudha — calm, spiritual\n"
+                "- Near Durbar Square — historic, old-city"
+            )
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1785,7 +1886,7 @@ async def chat(request: Request) -> JSONResponse:
                     "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": ["Thamel – lively, tourist-friendly", "Near Boudha – calm, spiritual", "Near Durbar Square – historic"],
+                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
                 }
             )
 
