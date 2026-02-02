@@ -1,0 +1,32 @@
+import asyncio
+import httpx
+
+async def test_final_llm():
+    url = "http://localhost:8000/api/chat"
+    
+    # Use the existing session from the previous test or create a new one
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json={"session_id": None, "message": ""})
+        data = r.json()
+        session_id = data.get('session_id')
+    
+    # Quick profile setup
+    profile_messages = ["yes", "3 days", "family of 4", "flexible", "comfortable", "temples and food", "thamel"]
+    
+    for msg in profile_messages:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json={"session_id": session_id, "message": msg})
+            data = r.json()
+            response = data.get('message', '')
+            print(f"Message: {msg}")
+            print(f"Response: {response[:200]}...")
+            print()
+            
+            # Check if we're getting detailed LLM responses
+            if len(response) > 200 and ("day" in response.lower() or "suggest" in response.lower()):
+                print("🎉 LLM IS WORKING!")
+                print(f"Full response: {response}")
+                return
+
+if __name__ == "__main__":
+    asyncio.run(test_final_llm())

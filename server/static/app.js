@@ -65,14 +65,15 @@ function executeCommands(commands) {
     }
 
     if (k === 'map.addPin' && payload) {
-      const { id, lat, lng, color, label, type } = payload;
+      const { id, lat, lng, label, type } = payload;
       if (!id || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       if (mapPins[id]) {
         markerLayer.removeLayer(mapPins[id]);
         delete mapPins[id];
       }
+      const pinColor = type === 'hotel' ? 'green' : 'blue';
       const shortLabel = type === 'hotel' ? 'H' : 'V';
-      const marker = L.marker([lat, lng], { icon: pinIcon(color, shortLabel) }).addTo(markerLayer);
+      const marker = L.marker([lat, lng], { icon: pinIcon(pinColor, shortLabel) }).addTo(markerLayer);
       if (label) marker.bindPopup(String(label));
       mapPins[id] = marker;
       continue;
@@ -156,8 +157,20 @@ function executeCommands(commands) {
 
     if (k === 'ui.enableButton' && payload) {
       const name = payload;
-      if (name === 'buildRoute') btnRoute.disabled = false;
-      if (name === 'export') btnExport.disabled = false;
+      if (name === 'buildRoute' && btnRoute) {
+        btnRoute.disabled = false;
+        btnRoute.removeAttribute('disabled');
+        btnRoute.style.cursor = 'pointer';
+        btnRoute.style.pointerEvents = 'auto';
+        btnRoute.style.opacity = '1';
+      }
+      if (name === 'export' && btnExport) {
+        btnExport.disabled = false;
+        btnExport.removeAttribute('disabled');
+        btnExport.style.cursor = 'pointer';
+        btnExport.style.pointerEvents = 'auto';
+        btnExport.style.opacity = '1';
+      }
       continue;
     }
 

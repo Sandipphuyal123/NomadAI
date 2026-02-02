@@ -184,6 +184,22 @@ def _is_trip_complete(trip_state: Dict[str, Any]) -> bool:
     return confirmed >= stay_days
 
 
+def _has_buildable_trip(trip_state: Dict[str, Any]) -> bool:
+    """True if user has hotel and at least one confirmed day (can build route)."""
+    if not isinstance(trip_state, dict) or not trip_state.get("hotel"):
+        return False
+    trip = trip_state.get("trip")
+    if not isinstance(trip, dict):
+        return False
+    days = trip.get("days")
+    if not isinstance(days, list):
+        return False
+    for d in days:
+        if isinstance(d, dict) and d.get("confirmed") is True:
+            return True
+    return False
+
+
 def _candidate_pois(trip_state: Dict[str, Any], limit: int = 3) -> List[Dict[str, Any]]:
     planned_ids: set[str] = set()
     try:
@@ -314,6 +330,66 @@ async def _ollama_chat(messages: List[Dict[str, str]]) -> str:
         return text
 
 
+def _context_for_llm(trip_state: Dict[str, Any]) -> str:
+    """Build context so the LLM remembers trip state and does not repeat suggestions."""
+    parts = []
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+    if isinstance(profile, dict):
+        td = profile.get("time_days")
+        if isinstance(td, int) and td > 0:
+            parts.append(f"User is staying {td} days. Plan only up to {td} days.")
+        if profile.get("group") and isinstance(profile["group"], dict) and profile["group"].get("count"):
+            parts.append(f"Group size: {profile['group'].get('count')}.")
+        if profile.get("comfort"):
+            parts.append(f"Comfort: {profile.get('comfort')}.")
+        if isinstance(profile.get("preferences"), list) and profile["preferences"]:
+            parts.append(f"Preferences: {', '.join(str(p) for p in profile['preferences'][:5])}.")
+    hotel = trip_state.get("hotel") if isinstance(trip_state, dict) else None
+    if isinstance(hotel, dict) and hotel.get("name"):
+        parts.append(f"Hotel/stay: {hotel.get('name')}.")
+    planned_names: List[str] = []
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days = trip.get("days") if isinstance(trip, dict) else None
+    if isinstance(days, list):
+        for d in days:
+            if not isinstance(d, dict):
+                continue
+            for pid in d.get("visits") or []:
+                if isinstance(pid, str):
+                    place = PLACES.get(pid)
+                    if place and place.get("name_en"):
+                        planned_names.append(str(place["name_en"]))
+    if planned_names:
+        parts.append("Already chosen (do not suggest again): " + ", ".join(planned_names) + ".")
+    return " ".join(parts)
+
+
+async def _maybe_llm_reply(
+    trip_state: Dict[str, Any], user_message: str, fallback: str, suggestion_names: Optional[List[str]] = None
+) -> str:
+    """Try short LLM reply with context; return fallback if Ollama fails."""
+    try:
+        context = _context_for_llm(trip_state)
+        system = (
+            "You are NomadAI, a Kathmandu travel guide. Be warm and brief. "
+            "Keep every reply to 2-4 sentences. Never suggest a place the user has already chosen. "
+            "If user said how many days they stay, only plan up to that many days.\n\nCurrent context: "
+            + context
+        )
+        if suggestion_names:
+            system += "\n\nSuggest only from this list: " + ", ".join(suggestion_names[:5]) + "."
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message or "What next?"},
+        ]
+        reply = await _ollama_chat(messages)
+        if reply and len(reply.strip()) > 5:
+            return reply.strip()[:500]
+    except Exception:
+        pass
+    return fallback
+
+
 def _system_prompt() -> str:
     return (
         "\n".join(
@@ -375,14 +451,14 @@ def _system_prompt() -> str:
 
 
 FALLBACK_LINES: Dict[str, str] = {
-    "vague": "That’s alright — Kathmandu doesn’t need everything decided upfront.\nLet’s keep this flexible for now.",
-    "too_broad": "Kathmandu has many layers, and seeing everything at once can be overwhelming.\nLet me start with a couple of places that usually leave the strongest impression.",
-    "skips_info": "I can suggest places without that detail, but the experience changes a lot once I know it.\nWe can come back to it when you’re ready.",
-    "changes_mind": "That’s completely fine. Plans here are meant to shift — let me adjust the direction.",
-    "exact_prices": "I’ll keep the numbers realistic, but I won’t lock them in.\nPrices here change by season and choice, and I’d rather not mislead you.",
-    "off_topic": "Let's focus on Kathmandu plans for now — we can explore other topics after your itinerary.",
-    "silent": "Take your time — no rush.\nWhen you’re ready, we can continue from wherever you’d like.",
-    "immediate_plan": "I can do that, but it’ll be much better with a little context.\nJust a couple of details, and I’ll keep it simple.",
+    "vague": "No problem — we can keep it flexible. What would you like to do next?",
+    "too_broad": "I'll suggest a few standout places. Which sounds good?",
+    "skips_info": "We can come back to that. What matters most to you right now?",
+    "changes_mind": "Sure, we can change the plan. What would you prefer?",
+    "exact_prices": "Prices vary by season; I'll give rough ranges. What's your comfort level?",
+    "off_topic": "Let's stick to Kathmandu plans. What would you like to see?",
+    "silent": "Take your time. When you're ready, just say what you'd like.",
+    "immediate_plan": "A couple of details will help — how many days, and where are you staying?",
 }
 
 
@@ -470,21 +546,20 @@ def _looks_like_exact_prices(message: str) -> bool:
 
 def _looks_like_off_topic(message: str) -> bool:
     m = message.strip().lower()
-    return any(
-        k in m
-        for k in [
-            "ai",
-            "llm",
-            "model",
-            "ollama",
-            "prompt",
-            "token",
-            "fine tune",
-            "finetune",
-            "api",
-            "openai",
-        ]
-    )
+    # Use word boundaries to avoid false positives like "family" containing "ai"
+    import re
+    patterns = [
+        r'\bai\b',
+        r'\bllm\b',
+        r'\bmodel\b',
+        r'\bollama\b',
+        r'\bprompt\b',
+        r'\btoken\b',
+        r'\bfine\s*tune\b',
+        r'\bapi\b',
+        r'\bopenai\b',
+    ]
+    return any(re.search(pattern, m) for pattern in patterns)
 
 
 def _looks_like_vague_or_confused(message: str) -> bool:
@@ -656,16 +731,16 @@ def _next_profile_field(trip_state: Dict[str, Any]) -> Optional[str]:
 
 def _profile_question_for(field: str) -> str:
     if field == "time_days":
-        return "Before I suggest a full flow, how many days do you have in Kathmandu? I ask because the pace changes a lot depending on time."
+        return "How many days will you be in Kathmandu?"
     if field == "group":
-        return "Are you visiting solo, as a duo, or with a group? I ask because walking pace and the kind of places that feel comfortable can change with company."
+        return "Solo, duo, or group? How many people?"
     if field == "budget":
-        return "Do you have a rough budget in mind (even a range), or should I keep it flexible for now? I ask because comfort and distance here can change costs quickly."
+        return "Rough budget in mind, or keep it flexible?"
     if field == "comfort":
-        return "What kind of comfort are you aiming for — budget, mid, or more comfortable? I ask so I don’t suggest days that feel too rushed or too expensive for your style."
+        return "Budget, mid-range, or more comfortable? I ask so I don’t suggest days that feel too rushed or too expensive for your style."
     if field == "preferences":
-        return "What do you enjoy most when you travel — history, temples, unique architecture (like Dharahara), food streets, or quieter corners? I ask so I can choose places that feel meaningful to you."
-    return "Would you like to share a little more about your trip so I can shape suggestions that fit you?"
+        return "What do you enjoy most — history, temples, food, or quieter spots?"
+    return "Anything else I should know to shape your plan?"
 
 
 def _ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
@@ -1238,7 +1313,7 @@ async def chat(request: Request) -> JSONResponse:
                 commands.append({"session.confirmDay": day_index})
                 if _is_trip_complete(trip_state):
                     commands.append({"ui.enableButton": "buildRoute"})
-                    reply = f"Saved. Day {day_index} is confirmed. Your trip is ready — you can now build routes."
+                    reply = _final_trip_summary(trip_state)
                     trip_state["ui_stage"] = "done"
                     return JSONResponse(
                         {
@@ -1253,9 +1328,28 @@ async def chat(request: Request) -> JSONResponse:
                     )
 
                 next_day = _current_day_index(trip_state)
+                stay_days = None
+                if isinstance(trip_state.get("trip_profile"), dict):
+                    stay_days = trip_state["trip_profile"].get("time_days")
+                if isinstance(stay_days, int) and next_day > stay_days:
+                    commands.append({"ui.enableButton": "buildRoute"})
+                    reply = f"All your {stay_days} days are planned. You can build routes now."
+                    trip_state["ui_stage"] = "done"
+                    return JSONResponse(
+                        {
+                            "session_id": session_id,
+                            "message": reply,
+                            "reply": reply,
+                            "commands": commands,
+                            "trip_state": trip_state,
+                            "map_actions": _map_actions_from_state(trip_state),
+                            "suggestions": [],
+                        }
+                    )
+
                 trip_state["ui_stage"] = "day_suggest"
                 picks = _candidate_pois(trip_state, limit=3)
-                reply = f"Saved. Day {day_index} is confirmed. For Day {next_day}, pick up to 2 visiting places (map clarity and comfort). Which place should we add first?"
+                reply = f"Day {day_index} saved. For Day {next_day}, pick up to 2 places. Which first?"
                 return JSONResponse(
                     {
                         "session_id": session_id,
@@ -1322,7 +1416,7 @@ async def chat(request: Request) -> JSONResponse:
                 }
             )
 
-    if _is_trip_complete(trip_state):
+    if _has_buildable_trip(trip_state):
         commands.append({"ui.enableButton": "buildRoute"})
     if _is_trip_complete(trip_state) and trip_state.get("routes"):
         commands.append({"ui.enableButton": "export"})
@@ -1549,6 +1643,25 @@ async def chat(request: Request) -> JSONResponse:
 
     if trip_state.get("planning_permission") is True:
         day_index = _current_day_index(trip_state)
+        stay_days = None
+        if isinstance(trip_state.get("trip_profile"), dict):
+            stay_days = trip_state["trip_profile"].get("time_days")
+        if isinstance(stay_days, int) and day_index > stay_days and _has_buildable_trip(trip_state):
+            commands.append({"ui.enableButton": "buildRoute"})
+            reply = f"All your {stay_days} days are planned. You can build routes now."
+            trip_state["ui_stage"] = "done"
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": [],
+                }
+            )
+
         d = _find_day(trip_state, day_index)
         visits = d.get("visits") if isinstance(d, dict) else None
         if message and trip_state.get("ui_stage") == "day_suggest" and _looks_like_save_day(message):
@@ -1585,7 +1698,7 @@ async def chat(request: Request) -> JSONResponse:
 
         if not trip_state.get("hotel"):
             trip_state["ui_stage"] = "collect_hotel"
-            reply = "Where are you staying in Kathmandu (an area is fine)? I ask because it becomes your starting point each day."
+            reply = "Where are you staying in Kathmandu? (Area is fine — it's your starting point each day.)"
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1685,10 +1798,11 @@ async def chat(request: Request) -> JSONResponse:
         lines = []
         for p in picks:
             lines.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
-        reply = (
-            f"For Day {day_index}, here are 2–3 great Kathmandu choices. I recommend max 2 visiting places per day (map clarity and comfort).\n\n"
-            + "\n".join(lines)
-            + "\n\nWhich one would you like to add first?"
+        short_reply = (
+            f"For Day {day_index}, pick up to 2 places: " + ", ".join(p["name_en"] for p in picks) + ". Which first?"
+        )
+        reply = await _maybe_llm_reply(
+            trip_state, message, short_reply, suggestion_names=[p["name_en"] for p in picks]
         )
         return JSONResponse(
             {
@@ -1702,7 +1816,7 @@ async def chat(request: Request) -> JSONResponse:
             }
         )
 
-    reply = _fallback("vague")
+    reply = await _maybe_llm_reply(trip_state, message, _fallback("vague"))
     return JSONResponse(
         {
             "session_id": session_id,
