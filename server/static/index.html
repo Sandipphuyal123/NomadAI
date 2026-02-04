@@ -15,34 +15,160 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="app">
-      <div class="content">
-        <div id="map" class="map"></div>
+    <div class="shell">
+      <header class="nav">
+        <div class="brand">
+          <div class="brandMark">✈</div>
+          <div class="brandName">NomadAI</div>
+        </div>
+        <div class="navActions">
+          <button id="btnCreateTrip" class="navBtn navBtnGhost" type="button">+ Create Trip</button>
+          <button class="navBtn" type="button" disabled>Login</button>
+        </div>
+      </header>
 
-        <div class="chat">
-          <div class="chatHeader">
-            <div class="title">NomadAI</div>
-            <div class="controls">
-              <button id="btnRoute" class="btn" disabled>Build route</button>
-              <button id="btnExport" class="btn btnGhost" disabled>Export</button>
-              <button id="btnReset" class="btn btnGhost">Reset</button>
+      <main>
+        <section id="screenLanding" class="screen screenLanding">
+          <div class="hero">
+            <div class="heroPill">AI‑Powered Travel Agent v2.0</div>
+            <h1 class="heroTitle">Design Your Dream<br/>Getaway in Seconds</h1>
+            <p class="heroSub">Tell us where you want to go, and let NomadAI craft a plan tailored to your time and vibe.</p>
+            <button id="btnStartPlanning" class="heroCta" type="button">Start Planning <span aria-hidden="true">→</span></button>
+
+            <div class="heroFeatures">
+              <div class="feat">
+                <div class="featIcon">✈</div>
+                <div class="featLabel">Smart Routes</div>
+              </div>
+              <div class="feat">
+                <div class="featIcon">$</div>
+                <div class="featLabel">Budget Control</div>
+              </div>
+              <div class="feat">
+                <div class="featIcon">❤</div>
+                <div class="featLabel">Personalized</div>
+              </div>
             </div>
           </div>
-          <div id="chatLog" class="chatLog"></div>
-          <form id="chatForm" class="chatForm">
-            <input id="chatInput" class="chatInput" placeholder="Ask about Kathmandu…" autocomplete="off" />
-            <button class="btn" type="submit">Send</button>
-          </form>
-          <div id="suggestions" class="suggestions"></div>
-          <div class="export">
-            <div class="exportHeader">
-              <div class="exportTitle">Export to Google Maps</div>
+        </section>
+
+        <section id="screenResults" class="screen screenResults isHidden">
+          <div class="resultsHero">
+            <div class="resultsHeroInner">
+              <div class="resultsCity" id="resultsCity">Kathmandu</div>
+              <div class="resultsDesc" id="resultsDesc">A balanced itinerary shaped around your budget and pace.</div>
+              <div class="resultsActions">
+                <button id="btnPersonalizedGuide" class="resultsCta" type="button">Personalized Guide</button>
+                <button id="btnEditChoices" class="resultsCta resultsCtaGhost" type="button">Edit choices</button>
+              </div>
             </div>
-            <div id="exportLinks" class="exportLinks"></div>
           </div>
-          <div class="hint">
-            💡 <strong>Tip:</strong> Click map markers to select places • Right-click to set your hotel • Say "I like [place name]" in chat to add locations
+
+          <div class="resultsGrid">
+            <div class="resultsLeft">
+              <div class="panel">
+                <div class="panelTitle">Your Daily Plan</div>
+                <div id="itinerary" class="itinerary"></div>
+              </div>
+            </div>
+
+            <div class="resultsRight">
+              <div class="panel">
+                <div class="panelTitle">Hotel Recommendation</div>
+                <div id="hotelRecs" class="cardList"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panelTitle">Trip Overview</div>
+                <div id="tripOverview" class="overview"></div>
+              </div>
+            </div>
           </div>
+        </section>
+
+        <section id="screenPlanner" class="screen screenPlanner isHidden">
+          <div class="content">
+            <div id="map" class="map"></div>
+
+            <div class="chat">
+              <div class="chatHeader">
+                <div class="title">NomadAI</div>
+                <div class="controls">
+                  <button id="btnRoute" class="btn" disabled>Build route</button>
+                  <button id="btnExport" class="btn btnGhost" disabled>Export</button>
+                  <button id="btnReset" class="btn btnGhost">Reset</button>
+                </div>
+              </div>
+              <div id="chatLog" class="chatLog"></div>
+              <form id="chatForm" class="chatForm">
+                <input id="chatInput" class="chatInput" placeholder="Ask about Kathmandu…" autocomplete="off" />
+                <button class="btn" type="submit">Send</button>
+              </form>
+              <div id="suggestions" class="suggestions"></div>
+              <div class="export">
+                <div class="exportHeader">
+                  <div class="exportTitle">Export to Google Maps</div>
+                </div>
+                <div id="exportLinks" class="exportLinks"></div>
+              </div>
+              <div class="hint">
+                💡 <strong>Tip:</strong> Click map markers to select places • Right-click to set your hotel • Say "I like [place name]" in chat to add locations
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="wizardOverlay" class="wizardOverlay isHidden" role="dialog" aria-modal="true">
+      <div class="wizardCard">
+        <div class="wizardTop">
+          <div class="wizardProgress">
+            <div id="wizardBar" class="wizardBar"></div>
+          </div>
+        </div>
+
+        <div class="wizardBody">
+          <div id="wizardStep1" class="wizardStep">
+            <h2 class="wizardTitle">Where’s your next adventure?</h2>
+            <p class="wizardSub">Pick your destination and duration.</p>
+            <label class="field">
+              <span class="fieldLabel">Destination</span>
+              <select id="wizDestination" class="fieldControl">
+                <option value="Kathmandu, Nepal" selected>Kathmandu, Nepal</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="fieldLabel">How many days?</span>
+              <input id="wizDays" class="fieldControl" type="number" min="1" max="14" value="2" />
+            </label>
+          </div>
+
+          <div id="wizardStep2" class="wizardStep isHidden">
+            <h2 class="wizardTitle">What’s your budget?</h2>
+            <p class="wizardSub">We’ll match your style.</p>
+            <div class="choiceGrid">
+              <button type="button" class="choice" data-budget="budget">$<div class="choiceLabel">Budget Friendly</div></button>
+              <button type="button" class="choice" data-budget="mid">$$<div class="choiceLabel">Moderate</div></button>
+              <button type="button" class="choice" data-budget="luxury">$$$<div class="choiceLabel">Luxury</div></button>
+            </div>
+          </div>
+
+          <div id="wizardStep3" class="wizardStep isHidden">
+            <h2 class="wizardTitle">Who are you traveling with?</h2>
+            <p class="wizardSub">So I can tune the pace.</p>
+            <div class="choiceGrid">
+              <button type="button" class="choice" data-group="solo">🧍<div class="choiceLabel">Solo Traveler</div></button>
+              <button type="button" class="choice" data-group="couple">💑<div class="choiceLabel">Couple</div></button>
+              <button type="button" class="choice" data-group="family">👨‍👩‍👧‍👦<div class="choiceLabel">Family</div></button>
+              <button type="button" class="choice" data-group="friends">🧑‍🤝‍🧑<div class="choiceLabel">Group/Friends</div></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="wizardFooter">
+          <button id="wizBack" class="navBtn navBtnGhost" type="button">Back</button>
+          <button id="wizNext" class="navBtn" type="button">Continue →</button>
         </div>
       </div>
     </div>

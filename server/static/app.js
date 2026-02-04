@@ -7,12 +7,46 @@ const btnExport = document.getElementById('btnExport');
 const suggestionsEl = document.getElementById('suggestions');
 const exportLinksEl = document.getElementById('exportLinks');
 
+const screenLanding = document.getElementById('screenLanding');
+const screenPlanner = document.getElementById('screenPlanner');
+const wizardOverlay = document.getElementById('wizardOverlay');
+const wizardBar = document.getElementById('wizardBar');
+const btnStartPlanning = document.getElementById('btnStartPlanning');
+const btnCreateTrip = document.getElementById('btnCreateTrip');
+
+const screenResults = document.getElementById('screenResults');
+const resultsCity = document.getElementById('resultsCity');
+const resultsDesc = document.getElementById('resultsDesc');
+const btnPersonalizedGuide = document.getElementById('btnPersonalizedGuide');
+const btnEditChoices = document.getElementById('btnEditChoices');
+const itineraryEl = document.getElementById('itinerary');
+const hotelRecsEl = document.getElementById('hotelRecs');
+const tripOverviewEl = document.getElementById('tripOverview');
+
+const wizardStep1 = document.getElementById('wizardStep1');
+const wizardStep2 = document.getElementById('wizardStep2');
+const wizardStep3 = document.getElementById('wizardStep3');
+const wizDestination = document.getElementById('wizDestination');
+const wizDays = document.getElementById('wizDays');
+const wizBack = document.getElementById('wizBack');
+const wizNext = document.getElementById('wizNext');
+
 const SESSION_KEY = 'ktm_session_id_v1';
 
 let sessionId = localStorage.getItem(SESSION_KEY) || '';
 let currentState = null;
 
 let placesIndex = {};
+
+let plannerBooted = false;
+
+const wizardState = {
+  step: 1,
+  destination: 'Kathmandu, Nepal',
+  days: 2,
+  budget: 'flexible',
+  group: 'solo'
+};
 
 const map = L.map('map', { zoomControl: true }).setView([27.7172, 85.3240], 13);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -24,6 +58,300 @@ const markerLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
 
 const mapPins = {};
+
+function show(el) {
+  if (!el) return;
+  el.classList.remove('isHidden');
+}
+
+function hide(el) {
+  if (!el) return;
+  el.classList.add('isHidden');
+}
+
+function setWizardStep(step) {
+  wizardState.step = step;
+  if (wizardBar) {
+    const pct = step === 1 ? 33.33 : step === 2 ? 66.66 : 100;
+    wizardBar.style.width = `${pct}%`;
+  }
+  if (wizBack) wizBack.disabled = step === 1;
+  if (wizNext) wizNext.textContent = step === 3 ? 'Generate Plan ✓' : 'Continue →';
+
+  if (wizardStep1) wizardStep1.classList.toggle('isHidden', step !== 1);
+  if (wizardStep2) wizardStep2.classList.toggle('isHidden', step !== 2);
+  if (wizardStep3) wizardStep3.classList.toggle('isHidden', step !== 3);
+}
+
+function openWizard() {
+  if (wizDestination) wizDestination.value = wizardState.destination;
+  if (wizDays) wizDays.value = String(wizardState.days || 2);
+  show(wizardOverlay);
+  setWizardStep(1);
+}
+
+function closeWizard() {
+  hide(wizardOverlay);
+}
+
+function mapsSearchUrl(name) {
+  const q = encodeURIComponent(String(name || '').trim() || 'Kathmandu');
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
+}
+
+function formatUsdRange(minUsd, maxUsd) {
+  const a = Math.round(minUsd);
+  const b = Math.round(maxUsd);
+  return `$${a}–$${b}`;
+}
+
+function usdToNpr(usd) {
+  // Approx; we avoid exact pricing guarantees.
+  const rate = 132;
+  return Math.round(usd * rate);
+}
+
+function hotelBudgetRangePerNight() {
+  if (wizardState.budget === 'budget') return { min: 18, max: 45 };
+  if (wizardState.budget === 'mid') return { min: 45, max: 90 };
+  if (wizardState.budget === 'luxury') return { min: 90, max: 180 };
+  return { min: 35, max: 95 };
+}
+
+function activityBudgetPerStop() {
+  if (wizardState.budget === 'budget') return { min: 1, max: 8 };
+  if (wizardState.budget === 'mid') return { min: 5, max: 18 };
+  if (wizardState.budget === 'luxury') return { min: 10, max: 35 };
+  return { min: 4, max: 20 };
+}
+
+function groupMultiplier() {
+  const g = wizardState.group;
+  if (g === 'solo') return 1;
+  if (g === 'couple') return 2;
+  if (g === 'family') return 3;
+  if (g === 'friends') return 4;
+  return 1;
+}
+
+function renderOverview() {
+  if (!tripOverviewEl) return;
+  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
+  const hotel = hotelBudgetRangePerNight();
+  const act = activityBudgetPerStop();
+  const ppl = groupMultiplier();
+
+  const hotelMin = hotel.min * days;
+  const hotelMax = hotel.max * days;
+  const stopCount = days * 2;
+  const actMin = act.min * stopCount * ppl;
+  const actMax = act.max * stopCount * ppl;
+
+  const totalMin = hotelMin + actMin;
+  const totalMax = hotelMax + actMax;
+
+  const budgetLabel = wizardState.budget === 'budget' ? 'Budget Friendly' : wizardState.budget === 'mid' ? 'Moderate' : wizardState.budget === 'luxury' ? 'Luxury' : 'Flexible';
+  const groupLabel = wizardState.group === 'solo' ? 'Solo' : wizardState.group === 'couple' ? 'Couple' : wizardState.group === 'family' ? 'Family' : wizardState.group === 'friends' ? 'Group/Friends' : 'Solo';
+
+  tripOverviewEl.innerHTML = '';
+  const rows = [
+    { k: 'Budget', v: budgetLabel },
+    { k: 'Traveler', v: groupLabel },
+    { k: 'No of Days', v: String(days) },
+    { k: 'Location', v: String(wizardState.destination || 'Kathmandu, Nepal') },
+    { k: 'Estimated Trip Range', v: `${formatUsdRange(totalMin, totalMax)} (≈ NPR ${usdToNpr(totalMin)}–${usdToNpr(totalMax)})` }
+  ];
+  for (const r of rows) {
+    const row = document.createElement('div');
+    row.className = 'ovRow';
+    const k = document.createElement('div');
+    k.className = 'ovKey';
+    k.textContent = r.k;
+    const v = document.createElement('div');
+    v.className = 'ovVal';
+    v.textContent = r.v;
+    row.appendChild(k);
+    row.appendChild(v);
+    tripOverviewEl.appendChild(row);
+  }
+}
+
+function renderHotelRecs() {
+  if (!hotelRecsEl) return;
+  hotelRecsEl.innerHTML = '';
+
+  const hotel = hotelBudgetRangePerNight();
+  const options = wizardState.budget === 'luxury'
+    ? ['Dwarika\'s Hotel', 'Hyatt Regency Kathmandu', 'Kathmandu Marriott Hotel']
+    : wizardState.budget === 'mid'
+      ? ['Aloft Kathmandu Thamel', 'Baber Mahal Vilas', 'Hotel Tibet International']
+      : ['Kathmandu Guest House', 'Hotel Yala Peak', 'Thamel Boutique Hotel'];
+
+  for (const name of options.slice(0, 2)) {
+    const card = document.createElement('div');
+    card.className = 'recCard';
+
+    const top = document.createElement('div');
+    top.className = 'recTop';
+    const left = document.createElement('div');
+    const nm = document.createElement('div');
+    nm.className = 'recName';
+    nm.textContent = name;
+    const sm = document.createElement('div');
+    sm.className = 'recSmall';
+    sm.textContent = 'Recommended based on your budget and pace.';
+    left.appendChild(nm);
+    left.appendChild(sm);
+
+    const price = document.createElement('div');
+    price.className = 'recPrice';
+    price.textContent = `${formatUsdRange(hotel.min, hotel.max)}/night`;
+
+    top.appendChild(left);
+    top.appendChild(price);
+
+    const sm2 = document.createElement('div');
+    sm2.className = 'recSmall';
+    sm2.textContent = `≈ NPR ${usdToNpr(hotel.min)}–${usdToNpr(hotel.max)} per night`;
+
+    const link = document.createElement('a');
+    link.className = 'stopLink';
+    link.href = mapsSearchUrl(`${name}, Kathmandu`);
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = 'View on Google Maps →';
+
+    card.appendChild(top);
+    card.appendChild(sm2);
+    card.appendChild(link);
+    hotelRecsEl.appendChild(card);
+  }
+}
+
+function pickPlacesForDays(days) {
+  const list = Object.values(placesIndex || {}).filter(p => p && p.name_en);
+  // Keep deterministic-ish: sort by name
+  list.sort((a, b) => String(a.name_en).localeCompare(String(b.name_en)));
+  const need = days * 2;
+  return list.slice(0, need);
+}
+
+function renderItinerary() {
+  if (!itineraryEl) return;
+  itineraryEl.innerHTML = '';
+
+  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
+  const picks = pickPlacesForDays(days);
+  const act = activityBudgetPerStop();
+
+  for (let d = 1; d <= days; d++) {
+    const card = document.createElement('div');
+    card.className = 'dayCard';
+
+    const header = document.createElement('div');
+    header.className = 'dayHeader';
+    const title = document.createElement('div');
+    title.className = 'dayTitle';
+    title.textContent = `Day ${d}`;
+    header.appendChild(title);
+    card.appendChild(header);
+
+    const stops = document.createElement('div');
+    stops.className = 'dayStops';
+
+    const hotelStop = document.createElement('div');
+    hotelStop.className = 'stop';
+    hotelStop.innerHTML = `
+      <div class="thumb"></div>
+      <div>
+        <div class="stopTitle">Hotel / Stay</div>
+        <div class="stopMeta">Start point for the day (we\'ll finalize it in the guide).</div>
+      </div>
+    `;
+    stops.appendChild(hotelStop);
+
+    const p1 = picks[(d - 1) * 2];
+    const p2 = picks[(d - 1) * 2 + 1];
+    for (const p of [p1, p2]) {
+      if (!p) continue;
+      const name = p.name_en;
+      const story = (p.storyShort || p.story || '').toString().trim();
+      const meta = story ? story.slice(0, 140) + (story.length > 140 ? '…' : '') : 'A great stop that fits your pace and interests.';
+
+      const stop = document.createElement('div');
+      stop.className = 'stop';
+      const priceTxt = `Estimated spend: ${formatUsdRange(act.min, act.max)} (≈ NPR ${usdToNpr(act.min)}–${usdToNpr(act.max)})`;
+
+      stop.innerHTML = `
+        <div class="thumb"></div>
+        <div>
+          <div class="stopTitle">${name}</div>
+          <div class="stopMeta">${priceTxt}</div>
+          <div class="stopMeta">${meta}</div>
+        </div>
+      `;
+      const link = document.createElement('a');
+      link.className = 'stopLink';
+      link.href = mapsSearchUrl(`${name}, Kathmandu`);
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = 'Open in Google Maps →';
+      stop.querySelector('div:last-child').appendChild(link);
+
+      stops.appendChild(stop);
+    }
+
+    card.appendChild(stops);
+    itineraryEl.appendChild(card);
+  }
+}
+
+function showResults() {
+  hide(screenLanding);
+  hide(screenPlanner);
+  show(screenResults);
+
+  if (resultsCity) resultsCity.textContent = 'Kathmandu';
+  if (resultsDesc) {
+    const budgetLabel = wizardState.budget === 'budget' ? 'budget-friendly' : wizardState.budget === 'mid' ? 'moderate' : wizardState.budget === 'luxury' ? 'luxury' : 'flexible';
+    resultsDesc.textContent = `A ${budgetLabel} itinerary tuned for your group and pace — 2 places per day.`;
+  }
+
+  renderHotelRecs();
+  renderOverview();
+  renderItinerary();
+}
+
+async function bootPlannerWithWizardState() {
+  hide(screenLanding);
+  hide(screenResults);
+  show(screenPlanner);
+
+  // Leaflet needs a size recalculation when a hidden container becomes visible.
+  setTimeout(() => {
+    try { map.invalidateSize(true); } catch { }
+  }, 50);
+
+  if (plannerBooted) return;
+  plannerBooted = true;
+
+  await loadPlaces();
+
+  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
+  const budgetText = wizardState.budget === 'budget' ? 'budget-friendly' : wizardState.budget === 'mid' ? 'moderate' : wizardState.budget === 'luxury' ? 'comfortable' : 'flexible';
+  const groupText = wizardState.group || 'solo';
+
+  const firstMsg =
+    `Yes — I'd like a personalized plan for ${wizardState.destination || 'Kathmandu'}. ` +
+    `I'm staying ${days} days. I'm traveling ${groupText}. ` +
+    `My budget is ${budgetText}. ` +
+    `Please keep it Kathmandu-only and help me plan day by day.`;
+
+  // Start/continue a session and seed the context.
+  const data = await apiChat({ session_id: sessionId || null, message: firstMsg });
+  applyServerResponse(data);
+  addMsg('assistant', data.message || data.reply);
+}
 
 function pinIcon(color, label) {
   const bg = color === 'green' ? '#10b981' : '#3b82f6';
@@ -44,6 +372,28 @@ function pinIcon(color, label) {
     iconSize: [32, 32],
     iconAnchor: [16, 16],
     popupAnchor: [0, -16]
+  });
+}
+
+function bindWizardChoices() {
+  if (!wizardOverlay) return;
+
+  // Budget choices
+  wizardOverlay.querySelectorAll('[data-budget]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const v = btn.getAttribute('data-budget') || 'flexible';
+      wizardState.budget = v;
+      wizardOverlay.querySelectorAll('[data-budget]').forEach((b) => b.classList.toggle('isActive', b === btn));
+    });
+  });
+
+  // Group choices
+  wizardOverlay.querySelectorAll('[data-group]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const v = btn.getAttribute('data-group') || 'solo';
+      wizardState.group = v;
+      wizardOverlay.querySelectorAll('[data-group]').forEach((b) => b.classList.toggle('isActive', b === btn));
+    });
   });
 }
 
@@ -396,14 +746,9 @@ async function resetSession() {
   renderExportLinks({ ok: false });
   renderMapActions(null);
   renderSuggestions(null);
-  await bootHello();
-}
-
-async function bootHello() {
-  await loadPlaces();
-  const data = await apiChat({ session_id: sessionId || null, message: '' });
-  addMsg('assistant', data.message || data.reply);
-  applyServerResponse(data);
+  // After reset, stay on planner screen and re-seed via wizard choices.
+  plannerBooted = false;
+  await bootPlannerWithWizardState();
 }
 
 chatForm.addEventListener('submit', async (e) => {
@@ -423,4 +768,49 @@ map.on('contextmenu', async (e) => {
   addMsg('assistant', "To set your stay point, please choose an area in chat (Thamel / Near Boudha / Near Durbar Square)." );
 });
 
-bootHello();
+bindWizardChoices();
+
+if (btnStartPlanning) btnStartPlanning.addEventListener('click', openWizard);
+if (btnCreateTrip) btnCreateTrip.addEventListener('click', openWizard);
+
+if (wizBack) {
+  wizBack.addEventListener('click', () => {
+    setWizardStep(Math.max(1, wizardState.step - 1));
+  });
+}
+
+if (wizNext) {
+  wizNext.addEventListener('click', async () => {
+    if (wizardState.step === 1) {
+      wizardState.destination = (wizDestination && wizDestination.value) ? wizDestination.value : 'Kathmandu, Nepal';
+      wizardState.days = (wizDays && wizDays.value) ? parseInt(String(wizDays.value), 10) : 2;
+      setWizardStep(2);
+      return;
+    }
+    if (wizardState.step === 2) {
+      setWizardStep(3);
+      return;
+    }
+
+    closeWizard();
+    await loadPlaces();
+    showResults();
+  });
+}
+
+// Initial screen
+show(screenLanding);
+hide(screenPlanner);
+hide(screenResults);
+
+if (btnPersonalizedGuide) {
+  btnPersonalizedGuide.addEventListener('click', async () => {
+    await bootPlannerWithWizardState();
+  });
+}
+
+if (btnEditChoices) {
+  btnEditChoices.addEventListener('click', () => {
+    openWizard();
+  });
+}

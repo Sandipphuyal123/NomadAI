@@ -16,6 +16,13 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
@@ -33,6 +40,15 @@ OTHER_CITIES = {
     "dharan",
     "janakpur",
     "nepalgunj",
+}
+
+
+# NOTE: Keep these as literal place-ids to avoid calling _place_id before it's defined.
+# They match _place_id("Thamel"), _place_id("Boudhanath Stupa"), _place_id("Kathmandu Durbar Square").
+STAY_AREA_PLACE_IDS = {
+    "thamel",
+    "boudhanath_stupa",
+    "kathmandu_durbar_square",
 }
 
 
@@ -318,9 +334,20 @@ async def _ollama_chat(messages: List[Dict[str, str]]) -> str:
     model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
     url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
-    payload = {"model": model, "messages": messages, "stream": False}
+    payload = {
+        "model": model, 
+        "messages": messages, 
+        "stream": False,
+        "options": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 300,  # Limit response length for speed
+            "num_predict": 300   # Alternative max_tokens for some models
+        }
+    }
 
-    timeout = httpx.Timeout(60.0, connect=5.0)
+    # Reduced timeout for faster failure detection
+    timeout = httpx.Timeout(30.0, connect=3.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{url}/api/chat", json=payload)
         r.raise_for_status()
@@ -384,10 +411,11 @@ async def _maybe_llm_reply(
         ]
         reply = await _ollama_chat(messages)
         if reply and len(reply.strip()) > 5:
-            return reply.strip()[:500]
+            return reply.strip()[:300]  # Reduced from 500 for speed
     except Exception:
         pass
-    return fallback
+    # Return empty string instead of fallback to let LLM handle it naturally
+    return ""
 
 
 async def _handle_completed_trip_questions(trip_state: Dict[str, Any], message: str, fallback: str) -> str:
@@ -422,10 +450,11 @@ async def _handle_completed_trip_questions(trip_state: Dict[str, Any], message: 
         ]
         reply = await _ollama_chat(messages)
         if reply and len(reply.strip()) > 5:
-            return reply.strip()[:500]
+            return reply.strip()[:300]  # Reduced from 500 for speed
     except Exception:
         pass
-    return fallback
+    # Return empty string instead of fallback to let LLM handle it naturally
+    return ""
 
 
 async def _generate_trip_summary(trip_state: Dict[str, Any]) -> str:
@@ -505,6 +534,32 @@ async def _generate_budget_estimate(trip_state: Dict[str, Any]) -> str:
         return "I had trouble estimating your budget. Costs vary widely depending on your choices - from budget-friendly local options to more comfortable tourist services."
 
 
+async def _maybe_llm_curiosity_reply(trip_state: Dict[str, Any], user_message: str, fallback: str) -> str:
+    """LLM answer used during mandatory question collection. Must not start planning days."""
+    try:
+        context = _context_for_llm(trip_state)
+        system = (
+            "You are NomadAI, a Kathmandu local guide. "
+            "Answer the user's question briefly (1-2 sentences). "
+            "Do NOT propose a day-by-day itinerary yet. "
+            "Do NOT ask new questions. "
+            "Do NOT mention being an AI. "
+            "Stay strictly in Kathmandu.\n\nCurrent context: "
+            + context
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message or ""},
+        ]
+        reply = await _ollama_chat(messages)
+        if reply and len(reply.strip()) > 5:
+            return reply.strip()[:350]
+    except Exception:
+        pass
+    # Return empty string instead of fallback to let LLM handle it naturally
+    return ""
+
+
 async def _handle_trip_modification_request(trip_state: Dict[str, Any], message: str) -> str:
     """Handle requests to modify the trip."""
     try:
@@ -526,6 +581,101 @@ async def _handle_trip_modification_request(trip_state: Dict[str, Any], message:
         return "I can help you modify your trip in several ways:\n\n• Add new places to specific days\n• Remove places you don't want\n• Move places between days\n• Adjust your itinerary\n\nJust tell me what you'd like to change!"
     except Exception:
         return "I can help you modify your trip! Let me know what changes you'd like to make to your itinerary."
+
+
+async def _narrate_response(
+    trip_state: Dict[str, Any],
+    user_message: str,
+    intent: str,
+    allowed_choices: Optional[List[str]] = None,
+    retrieved_stories: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Use LLM to draft a human-like response with RAG context while respecting constraints."""
+    try:
+        # Build rich context for the LLM
+        context_parts = []
+        
+        # Trip state context
+        profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+        if isinstance(profile, dict):
+            if profile.get("time_days"):
+                context_parts.append(f"User staying {profile['time_days']} days")
+            if profile.get("group"):
+                context_parts.append(f"Group: {profile['group'].get('label', 'unknown')}")
+            if profile.get("comfort"):
+                context_parts.append(f"Comfort: {profile['comfort']}")
+            if profile.get("preferences"):
+                context_parts.append(f"Interests: {', '.join(profile['preferences'][:3])}")
+        
+        # Current planning context
+        if trip_state.get("hotel"):
+            context_parts.append(f"Stay area: {trip_state['hotel'].get('name', 'Unknown')}")
+        
+        trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+        if isinstance(trip, dict):
+            confirmed_days = sum(1 for d in trip.get("days", []) if isinstance(d, dict) and d.get("confirmed"))
+            if confirmed_days > 0:
+                context_parts.append(f"Confirmed days: {confirmed_days}")
+        
+        # Add retrieved stories as local knowledge
+        story_context = ""
+        if retrieved_stories:
+            story_snippets = []
+            for story in retrieved_stories[:2]:  # Top 2 most relevant
+                name = story.get("place", "")
+                text = str(story.get("text", ""))[:200] + "..." if len(str(story.get("text", ""))) > 200 else str(story.get("text", ""))
+                story_snippets.append(f"{name}: {text}")
+            if story_snippets:
+                story_context = "\n\nLocal notes:\n" + "\n".join(story_snippets)
+        
+        # Allowed choices
+        choices_context = ""
+        if allowed_choices:
+            choices_context = f"\n\nSuggested options: {', '.join(allowed_choices[:5])}"
+        
+        # Build the full system prompt
+        system_prompt = (
+            "You are Aarav, a calm, experienced Kathmandu local guide. "
+            "Speak naturally and warmly, like a real person, not an AI. "
+            "Share small observations and explain why choices make sense. "
+            "Keep responses conversational but concise (2-4 sentences). "
+            "Never mention being an AI or model. "
+            "Focus only on Kathmandu.\n\n"
+            f"Context: {' '.join(context_parts)}{story_context}{choices_context}\n\n"
+            f"User intent: {intent}\n"
+            "Respond naturally to help the user."
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message or "What would you like to know?"},
+        ]
+        
+        reply = await _ollama_chat(messages)
+        if reply and len(reply.strip()) > 5:
+            return reply.strip()[:250]  # Reduced from 600 for speed
+    except Exception:
+        pass
+    
+    # Fallback to simple response
+    if intent == "greeting":
+        return "Namaste! I'm here to help you explore Kathmandu. What would you like to know?"
+    elif intent == "stay_area_selection":
+        return "Where would you like to stay in Kathmandu? Each area has its own character - Thamel is lively, Boudha is calm and spiritual, and Durbar Square is historic."
+    elif intent == "day_planning":
+        return "Let's plan your day! I'll suggest places that match your interests and keep the pace comfortable."
+    else:
+        return "I'm here to help with your Kathmandu trip. What would you like to explore?"
+
+
+async def _get_relevant_stories(query: str, limit: int = 2) -> List[Dict[str, Any]]:
+    """Retrieve relevant stories using RAG for LLM context."""
+    try:
+        # Add timeout to prevent hanging
+        import asyncio
+        return await asyncio.wait_for(RAG.retrieve(query, top_k=limit), timeout=2.0)
+    except Exception:
+        return []
 
 
 def _system_prompt() -> str:
@@ -764,7 +914,25 @@ def _parse_group(message: str) -> Optional[Dict[str, Any]]:
 def _parse_budget(message: str) -> Tuple[Optional[float], Optional[bool]]:
     m = message.strip().lower()
 
-    if any(k in m for k in ["don't know", "dont know", "not sure", "no idea", "haven't decided"]):
+    if any(
+        k in m
+        for k in [
+            "don't know",
+            "dont know",
+            "not sure",
+            "no idea",
+            "haven't decided",
+            "have not decided",
+            "no budget",
+            "don't have a budget",
+            "dont have a budget",
+            "no rough budget",
+            "don't have a rough budget",
+            "dont have a rough budget",
+            "keep it flexible",
+            "flexible",
+        ]
+    ):
         return None, True
 
     mm = re.search(r"\$\s*(\d+(?:\.\d+)?)", m)
@@ -842,48 +1010,7 @@ def _update_trip_profile_from_message(trip_state: Dict[str, Any], message: str) 
         profile["preferences"] = sorted(set([str(x) for x in existing] + prefs))
 
 
-def _next_profile_field(trip_state: Dict[str, Any]) -> Optional[str]:
-    profile = trip_state.get("trip_profile")
-    if not isinstance(profile, dict):
-        return "time_days"
-
-    asked = trip_state.get("asked_profile_fields")
-    if not isinstance(asked, list):
-        asked = []
-        trip_state["asked_profile_fields"] = asked
-
-    order = ["time_days", "group", "budget", "comfort", "preferences"]
-    missing = []
-    if not profile.get("time_days"):
-        missing.append("time_days")
-    if not profile.get("group"):
-        missing.append("group")
-    if profile.get("budget") is None and profile.get("budget_unknown") is None:
-        missing.append("budget")
-    if not profile.get("comfort"):
-        missing.append("comfort")
-    if not profile.get("preferences"):
-        missing.append("preferences")
-
-    for f in order:
-        if f in missing and f not in asked:
-            return f
-
-    return None
-
-
-def _profile_question_for(field: str) -> str:
-    if field == "time_days":
-        return "How many days will you be in Kathmandu?"
-    if field == "group":
-        return "Solo, duo, or group? How many people?"
-    if field == "budget":
-        return "Rough budget in mind, or keep it flexible?"
-    if field == "comfort":
-        return "Budget, mid-range, or more comfortable? I ask so I don’t suggest days that feel too rushed or too expensive for your style."
-    if field == "preferences":
-        return "What do you enjoy most — history, temples, food, or quieter spots?"
-    return "Anything else I should know to shape your plan?"
+# Removed unused profile collection functions - LLM handles everything naturally now
 
 
 def _ensure_session(session_id: Optional[str]) -> Tuple[str, Dict[str, Any]]:
@@ -1218,8 +1345,11 @@ def _add_visit_to_day(trip_state: Dict[str, Any], day_index: int, place_id: str)
     if not isinstance(visits, list):
         visits = []
         d["visits"] = visits
+    # Stay areas are not visiting stops (they're the green pin start point)
+    if place_id in STAY_AREA_PLACE_IDS:
+        return False, "stay_area"
     if place_id in visits:
-        return False, "already_added"
+        return False, "duplicate"
     if len(visits) >= 2:
         return False, "day_full"
     visits.append(place_id)
@@ -1417,35 +1547,50 @@ async def chat(request: Request) -> JSONResponse:
             }
         )
 
+    # Let LLM handle the entire conversation naturally
     if message and trip_state.get("planning_permission") is None:
         if _looks_like_yes(message):
             trip_state["planning_permission"] = True
-            trip_state["ui_stage"] = "collect_profile"
+            trip_state["ui_stage"] = "chat"
         elif _looks_like_no(message):
             trip_state["planning_permission"] = False
-            trip_state["ui_stage"] = "inspiration"
+            trip_state["ui_stage"] = "chat"
 
-    if trip_state.get("planning_permission") is False:
-        if message and _looks_like_yes(message):
-            trip_state["planning_permission"] = True
-            trip_state["ui_stage"] = "collect_profile"
-        else:
-            picks = _candidate_pois(trip_state, limit=3)
-            lines = []
-            for p in picks:
-                lines.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
-            reply = "Here are a few Kathmandu ideas you can enjoy without over-planning:\n\n" + "\n".join(lines)
-            return JSONResponse(
-                {
-                    "session_id": session_id,
-                    "message": reply,
-                    "reply": reply,
-                    "commands": commands,
-                    "trip_state": trip_state,
-                    "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": [p["name_en"] for p in picks],
-                }
-            )
+    # Handle all conversation through LLM
+    if trip_state.get("planning_permission") is not False:
+        # Use LLM for all responses
+        context = _context_for_llm(trip_state)
+        system_prompt = (
+            "You are Aarav, a calm, experienced Kathmandu local guide. "
+            "Speak naturally and warmly, like a real person, not an AI. "
+            "Help the user plan their Kathmandu trip by asking natural questions about their stay. "
+            "Find out about: how many days, group size, budget comfort level, and interests. "
+            "Don't use forms or lists - just have a natural conversation. "
+            "Once you understand their needs, help them choose a stay area and plan day-by-day activities. "
+            "Keep responses conversational and brief (2-4 sentences)."
+            f"\n\nCurrent context: {context}"
+        )
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message or "Hello! I'd like to plan a trip to Kathmandu."},
+        ]
+        
+        reply = await _ollama_chat(messages)
+        if not reply or not reply.strip():
+            reply = "Hello! I'm here to help you plan your Kathmandu trip. Tell me about what you're looking for!"
+        
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": [],
+            }
+        )
 
     if trip_state.get("planning_permission") is True and trip_state.get("ui_stage") == "day_confirm" and message:
         day_index = _current_day_index(trip_state)
@@ -1565,72 +1710,12 @@ async def chat(request: Request) -> JSONResponse:
     if _is_trip_complete(trip_state) and trip_state.get("routes"):
         commands.append({"ui.enableButton": "export"})
 
-    next_field = _next_profile_field(trip_state) if trip_state.get("planning_permission") is True else None
-    next_question = _profile_question_for(next_field) if next_field else None
+    # Remove all profile collection logic - let LLM handle everything
+    next_field = None
+    next_question = None
 
-    if next_field and next_question:
-        asked = trip_state.get("asked_profile_fields")
-        if not isinstance(asked, list):
-            asked = []
-            trip_state["asked_profile_fields"] = asked
-        if next_field not in asked:
-            asked.append(next_field)
-
-    if message and _looks_like_off_topic(message):
-        reply = _fallback("off_topic")
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
-
-    if message and _looks_like_too_broad(message):
-        reply = _fallback("too_broad")
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
-
-    if message and _looks_like_exact_prices(message):
-        reply = _fallback("exact_prices")
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
-
-    if message and _looks_like_change_of_mind(message):
-        reply = _fallback("changes_mind")
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
+    # Let LLM handle all off-topic, price, and other questions naturally
+    # No more static fallbacks
 
     if map_event:
         et = str(map_event.get("type", ""))
@@ -1756,19 +1841,7 @@ async def chat(request: Request) -> JSONResponse:
                 }
             )
 
-    if message and _is_outside_kathmandu(message):
-        reply = _fallback("off_topic")
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
+    # Remove all remaining static fallbacks - let the main LLM handler take care of everything
 
     # Handle completed trip questions first, regardless of UI stage
     if (trip_state.get("planning_permission") is True and 
@@ -1800,11 +1873,13 @@ async def chat(request: Request) -> JSONResponse:
             stay_days = trip_state["trip_profile"].get("time_days")
         if isinstance(stay_days, int) and day_index > stay_days and _has_buildable_trip(trip_state):
             commands.append({"ui.enableButton": "buildRoute"})
-            # Don't set ui_stage to "done" immediately - allow questions
-            if trip_state.get("ui_stage") != "done":
-                reply = f"All your {stay_days} days are planned. You can build routes now or ask me questions about your trip."
-            else:
-                reply = await _handle_completed_trip_questions(trip_state, message, fallback=f"All your {stay_days} days are planned. You can build routes now or ask me about your trip.")
+            # Mark done, but route subsequent messages through the completed-trip handler.
+            trip_state["ui_stage"] = "done"
+            reply = await _handle_completed_trip_questions(
+                trip_state,
+                message,
+                fallback=f"All your {stay_days} days are planned. You can build routes now or ask me questions about your trip.",
+            )
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1836,62 +1911,28 @@ async def chat(request: Request) -> JSONResponse:
                     }
                 )
 
-        if next_field and next_question:
-            trip_state["ui_stage"] = "collect_profile"
-            # If the user asked something "curious" instead of answering the missing field,
-            # answer briefly (LLM if available) then continue the required question.
-            profile_now = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
-            field_still_missing = True
-            if isinstance(profile_now, dict):
-                if next_field == "time_days" and isinstance(profile_now.get("time_days"), int):
-                    field_still_missing = False
-                elif next_field != "time_days" and profile_now.get(next_field):
-                    field_still_missing = False
-
-            if message and field_still_missing:
-                answered = await _maybe_llm_reply(
-                    trip_state,
-                    message,
-                    "I can help with that. "+next_question,
-                )
-                reply = answered.rstrip() + "\n\n" + next_question
-            else:
-                reply = next_question
-
-            return JSONResponse(
-                {
-                    "session_id": session_id,
-                    "message": reply,
-                    "reply": reply,
-                    "commands": commands,
-                    "trip_state": trip_state,
-                    "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": [],
-                }
-            )
-
-        if not trip_state.get("hotel"):
-            trip_state["ui_stage"] = "collect_hotel"
-            reply = (
-                "Before we plan days, pick where you’ll stay (it becomes your starting point each day):\n"
-                "- Thamel — lively, tourist-friendly\n"
-                "- Near Boudha — calm, spiritual\n"
-                "- Near Durbar Square — historic, old-city"
-            )
-            return JSONResponse(
-                {
-                    "session_id": session_id,
-                    "message": reply,
-                    "reply": reply,
-                    "commands": commands,
-                    "trip_state": trip_state,
-                    "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
-                }
-            )
+        # Remove all profile collection logic - LLM handles everything
+        # No more static questions or forms
 
         if d.get("confirmed") is True:
-            reply = f"Day {day_index} is already confirmed."
+            # Let LLM handle confirmed day questions naturally
+            context = _context_for_llm(trip_state)
+            system_prompt = (
+                "You are Aarav, a Kathmandu local guide. "
+                f"Day {day_index} is already confirmed. The user is asking about it. "
+                f"Respond naturally about what's planned for this day. "
+                f"Current context: {context}"
+            )
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message or "Tell me about this day"},
+            ]
+            
+            reply = await _ollama_chat(messages)
+            if not reply or not reply.strip():
+                reply = f"Day {day_index} is already confirmed. What would you like to know about it?"
+                
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -1974,15 +2015,23 @@ async def chat(request: Request) -> JSONResponse:
             )
 
         trip_state["ui_stage"] = "day_suggest"
-        lines = []
-        for p in picks:
-            lines.append(f"{p['name_en']}: {str(p.get('storyShort') or '').strip()}")
-        short_reply = (
-            f"For Day {day_index}, pick up to 2 places: " + ", ".join(p["name_en"] for p in picks) + ". Which first?"
+        picks = _candidate_pois(trip_state, limit=3)
+        # Use LLM to narrate day planning with local stories
+        stories = await _get_relevant_stories(f"Day {day_index} planning places to visit")
+        place_names = [p["name_en"] for p in picks]
+        reply = await _narrate_response(
+            trip_state,
+            message or f"What places should we visit on Day {day_index}?",
+            "day_planning",
+            allowed_choices=place_names,
+            retrieved_stories=stories
         )
-        reply = await _maybe_llm_reply(
-            trip_state, message, short_reply, suggestion_names=[p["name_en"] for p in picks]
-        )
+        # Add the specific question about choosing places
+        reply += f"\n\nFor Day {day_index}, pick up to 2 places: {', '.join(place_names)}. Which first?"
+        
+        # Fallback if LLM response is empty
+        if not reply or not reply.strip():
+            reply = f"For Day {day_index}, pick up to 2 places: {', '.join(place_names)}. Which first?"
         return JSONResponse(
             {
                 "session_id": session_id,
@@ -1995,18 +2044,7 @@ async def chat(request: Request) -> JSONResponse:
             }
         )
 
-    reply = await _maybe_llm_reply(trip_state, message, _fallback("vague"))
-    return JSONResponse(
-        {
-            "session_id": session_id,
-            "message": reply,
-            "reply": reply,
-            "commands": commands,
-            "trip_state": trip_state,
-            "map_actions": _map_actions_from_state(trip_state),
-            "suggestions": [],
-        }
-    )
+    # Remove final fallback - let main LLM handler catch everything
 
 
 routes = [
