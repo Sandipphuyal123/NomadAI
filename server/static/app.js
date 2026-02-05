@@ -3,7 +3,7 @@ const chatForm = document.getElementById('chatForm');
 const chatInput = document.getElementById('chatInput');
 const btnRoute = document.getElementById('btnRoute');
 const btnReset = document.getElementById('btnReset');
-const btnExport = document.getElementById('btnExport');
+const btnCalendar = document.getElementById('btnCalendar');
 const suggestionsEl = document.getElementById('suggestions');
 const exportLinksEl = document.getElementById('exportLinks');
 
@@ -39,6 +39,8 @@ let currentState = null;
 let placesIndex = {};
 
 let plannerBooted = false;
+let currentPlan = null;
+let thinkingEl = null;
 
 const wizardState = {
   step: 1,
@@ -49,9 +51,14 @@ const wizardState = {
 };
 
 const map = L.map('map', { zoomControl: true }).setView([27.7172, 85.3240], 13);
+// Satellite imagery with labels overlay for readability.
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
   maxZoom: 19,
   attribution: 'Tiles &copy; Esri'
+}).addTo(map);
+L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 19,
+  attribution: 'Labels &copy; Esri'
 }).addTo(map);
 
 const markerLayer = L.layerGroup().addTo(map);
@@ -138,20 +145,10 @@ function groupMultiplier() {
 
 function renderOverview() {
   if (!tripOverviewEl) return;
-  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
-  const hotel = hotelBudgetRangePerNight();
-  const act = activityBudgetPerStop();
-  const ppl = groupMultiplier();
-
-  const hotelMin = hotel.min * days;
-  const hotelMax = hotel.max * days;
-  const stopCount = days * 2;
-  const actMin = act.min * stopCount * ppl;
-  const actMax = act.max * stopCount * ppl;
-
-  const totalMin = hotelMin + actMin;
-  const totalMax = hotelMax + actMax;
-
+  if (!currentPlan) return;
+  const days = currentPlan.stay_days || 0;
+  const total = currentPlan.total_npr || { min: 0, max: 0 };
+  const hotel = (currentPlan.hotel_options && currentPlan.hotel_options.price_npr) || { min: 0, max: 0 };
   const budgetLabel = wizardState.budget === 'budget' ? 'Budget Friendly' : wizardState.budget === 'mid' ? 'Moderate' : wizardState.budget === 'luxury' ? 'Luxury' : 'Flexible';
   const groupLabel = wizardState.group === 'solo' ? 'Solo' : wizardState.group === 'couple' ? 'Couple' : wizardState.group === 'family' ? 'Family' : wizardState.group === 'friends' ? 'Group/Friends' : 'Solo';
 
@@ -161,7 +158,8 @@ function renderOverview() {
     { k: 'Traveler', v: groupLabel },
     { k: 'No of Days', v: String(days) },
     { k: 'Location', v: String(wizardState.destination || 'Kathmandu, Nepal') },
-    { k: 'Estimated Trip Range', v: `${formatUsdRange(totalMin, totalMax)} (≈ NPR ${usdToNpr(totalMin)}–${usdToNpr(totalMax)})` }
+    { k: 'Hotel (per night)', v: `≈ NPR ${hotel.min || 0}–${hotel.max || hotel.min || 0}` },
+    { k: 'Estimated Trip Range', v: `≈ NPR ${total.min || 0}–${total.max || total.min || 0}` }
   ];
   for (const r of rows) {
     const row = document.createElement('div');
@@ -175,6 +173,39 @@ function renderOverview() {
     row.appendChild(k);
     row.appendChild(v);
     tripOverviewEl.appendChild(row);
+  }
+}
+
+async function fetchPlan() {
+  const payload = {
+    days: wizardState.days || 2,
+    budget_tier: wizardState.budget || 'flexible',
+    group: wizardState.group || 'solo',
+    preferences: [],
+    comfort: wizardState.budget === 'budget' ? 'budget' : wizardState.budget === 'mid' ? 'mid' : 'comfortable'
+  };
+  const res = await fetch('/api/plan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error('Failed to create plan');
+  const data = await res.json();
+  if (data.session_id) {
+    sessionId = data.session_id;
+    localStorage.setItem(SESSION_KEY, sessionId);
+  }
+  if (data.plan) {
+    currentPlan = data.plan;
+  }
+
+  // Enable trip dates button once a plan exists.
+  if (btnCalendar) {
+    btnCalendar.disabled = false;
+    btnCalendar.removeAttribute('disabled');
+    btnCalendar.style.cursor = 'pointer';
+    btnCalendar.style.pointerEvents = 'auto';
+    btnCalendar.style.opacity = '1';
   }
 }
 
@@ -236,21 +267,23 @@ async function bootPlannerAsPersonalizedGuide() {
 
   isPersonalizedGuide = true;
 
-  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
-  const comfort = wizardState.budget === 'budget' ? 'budget' : wizardState.budget === 'mid' ? 'mid' : wizardState.budget === 'luxury' ? 'comfortable' : null;
-  const groupCount = groupMultiplier();
+  if (!currentPlan) {
+    await fetchPlan();
+  }
+  await loadPlaces();
 
+  const days = currentPlan?.stay_days || Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
   const guideInit = {
     destination: wizardState.destination || 'Kathmandu, Nepal',
     profile: {
       time_days: days,
       group_label: wizardState.group || 'solo',
-      group_count: groupCount,
-      comfort,
+      group_count: groupMultiplier(),
+      comfort: wizardState.budget === 'budget' ? 'budget' : wizardState.budget === 'mid' ? 'mid' : 'comfortable',
       budget_tier: wizardState.budget || 'flexible'
     },
-    hotel_options: getResultsHotelOptions(),
-    itinerary: { days: getResultsItinerary(days) }
+    hotel_options: (currentPlan && currentPlan.hotel_options) || getResultsHotelOptions(),
+    itinerary: { days: (currentPlan && currentPlan.days) || getResultsItinerary(days) }
   };
 
   const data = await apiChat({ session_id: sessionId || null, message: '', guide_init: guideInit });
@@ -261,15 +294,12 @@ async function bootPlannerAsPersonalizedGuide() {
 function renderHotelRecs() {
   if (!hotelRecsEl) return;
   hotelRecsEl.innerHTML = '';
+  if (!currentPlan || !currentPlan.hotel_options) return;
+  const hotel = currentPlan.hotel_options.price_npr || { min: 0, max: 0 };
+  const options = (currentPlan.hotel_options.options || []).slice(0, 2);
 
-  const hotel = hotelBudgetRangePerNight();
-  const options = wizardState.budget === 'luxury'
-    ? ['Dwarika\'s Hotel', 'Hyatt Regency Kathmandu', 'Kathmandu Marriott Hotel']
-    : wizardState.budget === 'mid'
-      ? ['Aloft Kathmandu Thamel', 'Baber Mahal Vilas', 'Hotel Tibet International']
-      : ['Kathmandu Guest House', 'Hotel Yala Peak', 'Thamel Boutique Hotel'];
-
-  for (const name of options.slice(0, 2)) {
+  for (const opt of options) {
+    const name = opt.name || 'Hotel';
     const card = document.createElement('div');
     card.className = 'recCard';
 
@@ -287,15 +317,13 @@ function renderHotelRecs() {
 
     const price = document.createElement('div');
     price.className = 'recPrice';
-    price.textContent = `${formatUsdRange(hotel.min, hotel.max)}/night`;
-
+    price.textContent = `≈ NPR ${hotel.min || 0}–${hotel.max || hotel.min || 0}/night`;
     top.appendChild(left);
     top.appendChild(price);
 
     const sm2 = document.createElement('div');
     sm2.className = 'recSmall';
-    sm2.textContent = `≈ NPR ${usdToNpr(hotel.min)}–${usdToNpr(hotel.max)} per night`;
-
+    sm2.textContent = `Range varies by room type.`;
     const link = document.createElement('a');
     link.className = 'stopLink';
     link.href = mapsSearchUrl(`${name}, Kathmandu`);
@@ -321,12 +349,12 @@ function pickPlacesForDays(days) {
 function renderItinerary() {
   if (!itineraryEl) return;
   itineraryEl.innerHTML = '';
+  if (!currentPlan || !Array.isArray(currentPlan.days)) return;
 
-  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
-  const picks = pickPlacesForDays(days);
-  const act = activityBudgetPerStop();
+  const daysArr = currentPlan.days.slice().sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
 
-  for (let d = 1; d <= days; d++) {
+  for (const day of daysArr) {
+    const d = day.dayIndex || 0;
     const card = document.createElement('div');
     card.className = 'dayCard';
 
@@ -352,24 +380,26 @@ function renderItinerary() {
     `;
     stops.appendChild(hotelStop);
 
-    const p1 = picks[(d - 1) * 2];
-    const p2 = picks[(d - 1) * 2 + 1];
-    for (const p of [p1, p2]) {
+    const visitIds = (day.visits || []).slice(0, 2);
+    for (const pid of visitIds) {
+      const p = placesIndex[pid];
       if (!p) continue;
       const name = p.name_en;
       const story = (p.storyShort || p.story || '').toString().trim();
       const meta = story ? story.slice(0, 140) + (story.length > 140 ? '…' : '') : 'A great stop that fits your pace and interests.';
+      const etiquette = Array.isArray(p.common_mistakes) && p.common_mistakes.length ? `Etiquette: ${p.common_mistakes[0]}.` : '';
+      const price = (day.cost_npr || {});
+      const priceTxt = `Day est: NPR ${price.min || 0}–${price.max || price.min || 0}`;
 
       const stop = document.createElement('div');
       stop.className = 'stop';
-      const priceTxt = `Estimated spend: ${formatUsdRange(act.min, act.max)} (≈ NPR ${usdToNpr(act.min)}–${usdToNpr(act.max)})`;
-
       stop.innerHTML = `
         <div class="thumb"></div>
         <div>
           <div class="stopTitle">${name}</div>
           <div class="stopMeta">${priceTxt}</div>
           <div class="stopMeta">${meta}</div>
+          <div class="stopMeta">${etiquette}</div>
         </div>
       `;
       const link = document.createElement('a');
@@ -379,7 +409,6 @@ function renderItinerary() {
       link.rel = 'noreferrer';
       link.textContent = 'Open in Google Maps →';
       stop.querySelector('div:last-child').appendChild(link);
-
       stops.appendChild(stop);
     }
 
@@ -396,7 +425,7 @@ function showResults() {
   if (resultsCity) resultsCity.textContent = 'Kathmandu';
   if (resultsDesc) {
     const budgetLabel = wizardState.budget === 'budget' ? 'budget-friendly' : wizardState.budget === 'mid' ? 'moderate' : wizardState.budget === 'luxury' ? 'luxury' : 'flexible';
-    resultsDesc.textContent = `A ${budgetLabel} itinerary tuned for your group and pace — 2 places per day.`;
+    resultsDesc.textContent = `A ${budgetLabel} itinerary tuned for your group and pace — up to 2 places per day.`;
   }
 
   renderHotelRecs();
@@ -663,13 +692,7 @@ function executeCommands(commands) {
         btnRoute.style.pointerEvents = 'auto';
         btnRoute.style.opacity = '1';
       }
-      if (name === 'export' && btnExport) {
-        btnExport.disabled = false;
-        btnExport.removeAttribute('disabled');
-        btnExport.style.cursor = 'pointer';
-        btnExport.style.pointerEvents = 'auto';
-        btnExport.style.opacity = '1';
-      }
+      // We no longer use a separate 'export' button; trip dates are enabled after planning.
       continue;
     }
 
@@ -711,6 +734,23 @@ function addMsg(role, text) {
   el.textContent = text;
   chatLog.appendChild(el);
   chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function showThinking() {
+  if (!chatLog || thinkingEl) return;
+  const el = document.createElement('div');
+  el.className = 'msg assistant loading';
+  el.textContent = 'NomadAI is thinking…';
+  chatLog.appendChild(el);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  thinkingEl = el;
+}
+
+function hideThinking() {
+  if (thinkingEl && thinkingEl.parentNode) {
+    thinkingEl.parentNode.removeChild(thinkingEl);
+  }
+  thinkingEl = null;
 }
 
 function renderExportLinks(payload) {
@@ -757,6 +797,14 @@ async function exportToGoogleMaps() {
   }
   const data = await res.json();
   renderExportLinks(data);
+  const links = Array.isArray(data.links) ? data.links : [];
+  if (links.length > 0 && links[0].url) {
+    try {
+      window.open(links[0].url, '_blank', 'noreferrer');
+    } catch {
+      // ignore
+    }
+  }
 }
 
 async function loadPlaces() {
@@ -797,6 +845,8 @@ function renderMapActions(mapActions) {
 
   if (!mapActions) return;
 
+  const fitPoints = [];
+
   if (Array.isArray(mapActions.center) && mapActions.center.length === 2) {
     const z = Number.isFinite(mapActions.zoom) ? mapActions.zoom : map.getZoom();
     map.setView(mapActions.center, z, { animate: true });
@@ -807,7 +857,17 @@ function renderMapActions(mapActions) {
       const pl = r.polyline;
       if (!Array.isArray(pl) || pl.length < 2) continue;
       L.polyline(pl, { color: '#ffd28a', weight: 4, opacity: 0.85 }).addTo(routeLayer);
+      for (const pt of pl) {
+        if (Array.isArray(pt) && pt.length === 2) fitPoints.push(pt);
+      }
     }
+  }
+
+  if (fitPoints.length >= 2) {
+    const bounds = L.latLngBounds(fitPoints.map(p => L.latLng(p[0], p[1])));
+    try {
+      map.fitBounds(bounds, { padding: [40, 40] });
+    } catch {}
   }
 }
 
@@ -843,40 +903,73 @@ async function sendUserMessage(text) {
   const msg = (text || '').trim();
   if (!msg) return;
   addMsg('user', msg);
-
-  const data = await apiChat({ session_id: sessionId || null, message: msg });
-  applyServerResponse(data);
-  addMsg('assistant', data.message || data.reply);
+  showThinking();
+  try {
+    const data = await apiChat({ session_id: sessionId || null, message: msg });
+    applyServerResponse(data);
+    addMsg('assistant', data.message || data.reply);
+  } catch (error) {
+    console.error('sendUserMessage error:', error);
+    addMsg('assistant', 'Sorry — something went wrong while responding. Please try again.');
+  } finally {
+    hideThinking();
+  }
 }
 
 async function selectPlace(place) {
-  const data = await apiChat({
-    session_id: sessionId || null,
-    message: '',
-    map_event: { type: 'select_place', name: place.name, coordinates: place.coordinates }
-  });
-  addMsg('assistant', data.message || data.reply);
-  applyServerResponse(data);
+  showThinking();
+  try {
+    const data = await apiChat({
+      session_id: sessionId || null,
+      message: '',
+      map_event: { type: 'select_place', name: place.name, coordinates: place.coordinates }
+    });
+    addMsg('assistant', data.message || data.reply);
+    applyServerResponse(data);
+  } catch (error) {
+    console.error('selectPlace error:', error);
+    addMsg('assistant', 'Sorry — I could not add that place. Please try again.');
+  } finally {
+    hideThinking();
+  }
 }
 
 async function setHotel(latlng) {
-  const data = await apiChat({
-    session_id: sessionId || null,
-    message: '',
-    map_event: { type: 'set_hotel', name: 'Stay', coordinates: [latlng.lat, latlng.lng] }
-  });
-  addMsg('assistant', data.message || data.reply);
-  applyServerResponse(data);
+  showThinking();
+  try {
+    const data = await apiChat({
+      session_id: sessionId || null,
+      message: '',
+      map_event: { type: 'set_hotel', name: 'Stay', coordinates: [latlng.lat, latlng.lng] }
+    });
+    addMsg('assistant', data.message || data.reply);
+    applyServerResponse(data);
+  } catch (error) {
+    console.error('setHotel error:', error);
+    addMsg('assistant', 'Sorry — I could not set that stay point. Please try again.');
+  } finally {
+    hideThinking();
+  }
 }
 
-async function buildRoute() {
-  const data = await apiChat({
-    session_id: sessionId || null,
-    message: '',
-    map_event: { type: 'create_route' }
-  });
-  addMsg('assistant', data.message || data.reply);
-  applyServerResponse(data);
+async function buildAndOpenRoutes() {
+  if (btnRoute && btnRoute.disabled) return;
+  showThinking();
+  try {
+    const data = await apiChat({
+      session_id: sessionId || null,
+      message: '',
+      map_event: { type: 'create_route' }
+    });
+    addMsg('assistant', data.message || data.reply);
+    applyServerResponse(data);
+    await exportToGoogleMaps();
+  } catch (error) {
+    console.error('buildAndOpenRoutes error:', error);
+    addMsg('assistant', 'Sorry — I could not build or open the routes. Please confirm your days and try again.');
+  } finally {
+    hideThinking();
+  }
 }
 
 async function resetSession() {
@@ -892,13 +985,53 @@ async function resetSession() {
   routeLayer.clearLayers();
   map.setView([27.7172, 85.3240], 13, { animate: true });
   if (btnRoute) btnRoute.disabled = true;
-  if (btnExport) btnExport.disabled = true;
+  if (btnCalendar) btnCalendar.disabled = true;
   renderExportLinks({ ok: false });
   renderMapActions(null);
   renderSuggestions(null);
   // After reset, stay on planner screen and re-seed via wizard choices.
   plannerBooted = false;
   await bootPlannerWithWizardState();
+}
+
+async function showTripDates() {
+  if (!currentPlan || !Array.isArray(currentPlan.days)) {
+    addMsg('assistant', 'I need a saved plan first. Please finish planning, then try again.');
+    return;
+  }
+  const input = window.prompt('When does your Kathmandu stay start? (YYYY-MM-DD)');
+  if (!input) return;
+  const start = new Date(input);
+  if (Number.isNaN(start.getTime())) {
+    addMsg('assistant', 'That date did not look valid. Please use format YYYY-MM-DD.');
+    return;
+  }
+  const lines = [];
+  const daysArr = currentPlan.days.slice().sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
+  for (const day of daysArr) {
+    const idx = day.dayIndex || 1;
+    const d = new Date(start.getTime());
+    d.setDate(d.getDate() + (idx - 1));
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const dateStr = `${y}-${m}-${dd}`;
+    const visitIds = (day.visits || []).slice(0, 2);
+    const names = [];
+    names.push('Hotel / Stay');
+    for (const pid of visitIds) {
+      const p = placesIndex[pid];
+      if (p && p.name_en) names.push(p.name_en);
+    }
+    lines.push(`${dateStr}: ${names.join(' → ')}`);
+  }
+  addMsg('assistant', `Trip calendar (Kathmandu):\n` + lines.join('\n'));
+  try {
+    // Open Google Calendar so the traveler can paste these lines into events.
+    window.open('https://calendar.google.com/calendar/u/0/r', '_blank', 'noreferrer');
+  } catch {
+    // ignore
+  }
 }
 
 chatForm.addEventListener('submit', async (e) => {
@@ -910,9 +1043,9 @@ chatForm.addEventListener('submit', async (e) => {
   await sendUserMessage(text);
 });
 
-btnRoute.addEventListener('click', buildRoute);
-btnReset.addEventListener('click', resetSession);
-if (btnExport) btnExport.addEventListener('click', exportToGoogleMaps);
+if (btnRoute) btnRoute.addEventListener('click', buildAndOpenRoutes);
+if (btnReset) btnReset.addEventListener('click', resetSession);
+if (btnCalendar) btnCalendar.addEventListener('click', showTripDates);
 
 map.on('contextmenu', async (e) => {
   addMsg('assistant', "To set your stay point, please choose an area in chat (Thamel / Near Boudha / Near Durbar Square)." );
@@ -943,6 +1076,7 @@ if (wizNext) {
     }
 
     closeWizard();
+    await fetchPlan();
     await loadPlaces();
     showResults();
   });

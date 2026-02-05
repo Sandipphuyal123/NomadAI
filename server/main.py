@@ -17,12 +17,23 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-# Load environment variables from .env file
+# Import Gemini configuration
+import sys
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from gemini_config import gemini_chat
+
+# Load environment variables from .env file (optional)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv('../.env')  # Load from parent directory
 except ImportError:
     pass
+
+# Toggle for using local LLM (Ollama). Default off for speed unless explicitly enabled.
+USE_LLM = os.environ.get("NOMADAI_USE_LLM", "0") == "1"
+
+# Toggle for using Gemini API instead of Ollama
+USE_GEMINI = os.environ.get("USE_GEMINI", "1") == "1"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -190,11 +201,102 @@ for p in POIS:
         "lat": float(coords[0]),
         "lng": float(coords[1]),
         "category": str(p.get("category", "")),
+        "ticket_price_npr": p.get("ticket_price_npr") or {"min": 0, "max": 0},
+        "duration_hours": p.get("duration_hours"),
+        "best_time": p.get("best_time") or [],
+        "walking_level": p.get("walking_level"),
+        "suitable_for": p.get("suitable_for") or [],
+        "common_mistakes": p.get("common_mistakes") or [],
+        "nearby_food": p.get("nearby_food") or [],
         "storyShort": story_text,
         "costRange": _cost_range_for_category(str(p.get("category", ""))),
         "images": [],
         "review": "A well-loved stop for first-time visitors — easy to reach, and memorable without feeling rushed.",
     }
+
+
+def _pref_labels_to_categories() -> Dict[str, List[str]]:
+    return {
+        "history": ["heritage", "museum", "walk"],
+        "spiritual": ["temple", "stupa", "monastery"],
+        "architecture": ["heritage", "temple", "stupa"],
+        "markets": ["market", "neighborhood", "walk"],
+        "food": ["market", "neighborhood", "walk"],
+        "calm": ["park", "nature", "viewpoint"],
+        "viewpoints": ["viewpoint"],
+    }
+
+
+def _score_poi_for_plan(p: Dict[str, Any], prefs: List[str], group: str) -> float:
+    if not isinstance(p, dict):
+        return 0.0
+    score = 0.0
+    cat = str(p.get("category") or "").lower()
+    pref_map = _pref_labels_to_categories()
+    prefs_norm = [str(x).lower() for x in prefs if isinstance(x, str)]
+    for pref in prefs_norm:
+        cats = pref_map.get(pref, [])
+        if cat in cats:
+            score += 2.0
+    if group and isinstance(p.get("suitable_for"), list):
+        if group in [str(x).lower() for x in p.get("suitable_for")]:
+            score += 1.0
+    price = p.get("ticket_price_npr") or {}
+    if isinstance(price, dict):
+        score -= float(price.get("min") or 0) / 2000.0
+    score -= float(p.get("duration_hours") or 0) / 10.0
+    return score
+
+
+def _select_plan_pois(days: int, prefs: List[str], group: str) -> List[Dict[str, Any]]:
+    need = max(1, days) * 2
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for p in POIS:
+        scored.append((_score_poi_for_plan(p, prefs, group), p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in scored[:need]]
+
+
+def _plan_day_cost(visits: List[Dict[str, Any]]) -> Dict[str, int]:
+    t_min = 0
+    t_max = 0
+    for v in visits:
+        if not isinstance(v, dict):
+            continue
+        price = v.get("ticket_price_npr") or {}
+        if isinstance(price, dict):
+            t_min += int(price.get("min") or 0)
+            t_max += int(price.get("max") or price.get("min") or 0)
+    # add simple transport buffer per stop
+    stops = len([v for v in visits if v])
+    t_min += 300 * stops
+    t_max += 800 * stops
+    return {"min": t_min, "max": max(t_min, t_max)}
+
+
+def _hotel_options_for_budget(budget: str) -> Dict[str, Any]:
+    budget = (budget or "flexible").lower()
+    if budget == "luxury":
+        opts = ["Dwarika's Hotel", "Hyatt Regency Kathmandu", "Kathmandu Marriott Hotel"]
+        price = {"min": 12000, "max": 22000}
+    elif budget == "mid":
+        opts = ["Aloft Kathmandu Thamel", "Baber Mahal Vilas", "Hotel Tibet International"]
+        price = {"min": 6000, "max": 12000}
+    else:
+        opts = ["Kathmandu Guest House", "Hotel Yala Peak", "Thamel Boutique Hotel"]
+        price = {"min": 3500, "max": 7000}
+    return {"options": [{"name": n} for n in opts[:2]], "price_npr": price}
+
+
+def _plan_total_range(days_out: List[Dict[str, Any]], hotel_price: Dict[str, int]) -> Dict[str, int]:
+    day_min = sum(int(d.get("cost_npr", {}).get("min") or 0) for d in days_out)
+    day_max = sum(int(d.get("cost_npr", {}).get("max") or 0) for d in days_out)
+    hm = int((hotel_price or {}).get("min") or 0)
+    hM = int((hotel_price or {}).get("max") or hm)
+    # assume one night per day
+    total_min = day_min + hm * len(days_out)
+    total_max = day_max + hM * len(days_out)
+    return {"min": total_min, "max": total_max}
 
 
 def _default_trip_state() -> Dict[str, Any]:
@@ -384,20 +486,22 @@ async def _ollama_chat(messages: List[Dict[str, str]]) -> str:
     url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
     payload = {
-        "model": model, 
-        "messages": messages, 
+        "model": model,
+        "messages": messages,
         "stream": False,
         "options": {
             "temperature": 0.5,
             "top_p": 0.85,
             "repeat_penalty": 1.12,
-            "max_tokens": 600,
-            "num_predict": 600,
-            "stop": ["|RF|", "</s>"]
-        }
+            # Keep replies short for latency: ~250–300 tokens max.
+            "max_tokens": 320,
+            "num_predict": 320,
+            "stop": ["|RF|", "</s>"],
+        },
     }
 
-    timeout = httpx.Timeout(60.0, connect=5.0)
+    # Shorter timeout to avoid 1–2 minute stalls if Ollama is slow/unavailable.
+    timeout = httpx.Timeout(15.0, connect=3.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{url}/api/chat", json=payload)
         r.raise_for_status()
@@ -539,16 +643,30 @@ def _direct_food_reply(user_message: str) -> Optional[str]:
 
 
 async def _llm_reply_with_memory(trip_state: Dict[str, Any], history: List[Dict[str, str]], user_message: str) -> str:
+    # Fast path: if LLM is disabled, return a deterministic, brief reply.
+    if not USE_LLM:
+        base = "I'm here with you in guide mode. Tell me what you're trying to do in Kathmandu, and I'll help using your saved plan."
+        if not user_message.strip():
+            return base
+        return base + " " + user_message.strip()
+
     messages = [{"role": "system", "content": _llm_system_prompt(trip_state, user_message)}]
     messages.extend(_history_for_llm(history))
     messages.append({"role": "user", "content": user_message or ""})
     try:
-        reply = await _ollama_chat(messages)
+        # Use Gemini if enabled, otherwise fall back to Ollama
+        if USE_GEMINI:
+            reply = await gemini_chat(messages)
+        else:
+            reply = await _ollama_chat(messages)
+        
         if reply and reply.strip():
             return reply.strip()
-    except Exception:
-        pass
-    return "I’m here with you — tell me what you’re trying to do in Kathmandu and I’ll guide you step by step."
+    except Exception as e:
+        # Fall back to a safe, fast reply instead of stalling.
+        print(f"LLM error: {e}")
+        return "I'm here with you — my detailed answer is taking too long, but I can still help if you tell me your next question in simple words."
+    return "I'm here with you — tell me what you're trying to do in Kathmandu and I'll guide you step by step."
 
 
 def _context_for_llm(trip_state: Dict[str, Any]) -> str:
@@ -1121,6 +1239,17 @@ def _rag_text_for_query(query: str, top_k: int = 3) -> str:
         text = d.get("text", "")
         parts.append(f"[{title}]\n{text}")
     return "\n\n".join(parts).strip()
+
+
+# Override system prompt with constrained guide behavior (brief, grounded, no re-planning)
+def _system_prompt() -> str:
+    return (
+        "You are NomadAI, a Kathmandu-only local guide. Be calm and brief (2–4 sentences). "
+        "Explain, clarify, or guide only—never re-plan itineraries or add days. "
+        "Never suggest places already chosen. Respect the user's stay_days cap. "
+        "Use ranges only for costs; if unknown, say so and suggest on-site confirmation or local apps (InDrive/Pathao). "
+        "Stay silent if nothing useful is needed."
+    )
 
 
 def _find_poi_by_name(name: str) -> Optional[Dict[str, Any]]:
@@ -1819,6 +1948,56 @@ def export_plan(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "days": len(days_list), "links": links})
 
 
+async def plan(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+
+    session_id_value = request.query_params.get("session_id") or payload.get("session_id")
+    if not isinstance(session_id_value, str) or not session_id_value:
+        session_id_value = None
+    session_id, session = _ensure_session(session_id_value)
+
+    days = int(payload.get("days") or payload.get("stay_days") or 2)
+    days = max(1, min(14, days))
+    budget = str(payload.get("budget_tier") or "flexible").lower()
+    group_label = str(payload.get("group") or payload.get("group_label") or "solo").lower()
+    prefs_raw = payload.get("preferences") or []
+    preferences = [str(x).lower() for x in prefs_raw if isinstance(x, str)]
+    comfort = payload.get("comfort")
+
+    selected = _select_plan_pois(days, preferences, group_label)
+    days_out: List[Dict[str, Any]] = []
+    idx = 0
+    for di in range(1, days + 1):
+        v1 = selected[idx] if idx < len(selected) else None
+        v2 = selected[idx + 1] if idx + 1 < len(selected) else None
+        idx += 2
+        visits = [v for v in [v1, v2] if v]
+        cost = _plan_day_cost(visits)
+        days_out.append({"dayIndex": di, "visits": [_place_id(v["name"]) for v in visits if v], "cost_npr": cost})
+
+    hotel_opts = _hotel_options_for_budget(budget)
+    total_range = _plan_total_range(days_out, hotel_opts.get("price_npr") or {})
+
+    plan_obj = {
+        "stay_days": days,
+        "budget_tier": budget,
+        "group_label": group_label,
+        "comfort": comfort,
+        "preferences": preferences,
+        "days": days_out,
+        "hotel_options": hotel_opts,
+        "total_npr": total_range,
+    }
+
+    session["plan"] = plan_obj
+    return JSONResponse({"ok": True, "plan": plan_obj, "session_id": session_id})
+
+
 def index(request: Request) -> Response:
     return FileResponse(str(STATIC_DIR / "index.html"))
 
@@ -2504,6 +2683,7 @@ async def chat(request: Request) -> JSONResponse:
 
 routes = [
     Route("/", endpoint=index, methods=["GET"]),
+    Route("/api/plan", endpoint=plan, methods=["POST"]),
     Route("/api/health", endpoint=health, methods=["GET"]),
     Route("/api/pois", endpoint=pois, methods=["GET"]),
     Route("/api/places", endpoint=places, methods=["GET"]),
