@@ -88,8 +88,6 @@
 
         <section id="screenPlanner" class="screen screenPlanner isHidden">
           <div class="content">
-            <div id="map" class="map"></div>
-
             <div class="chat">
             <div class="chatHeader">
               <div class="title">NomadAI</div>
@@ -99,6 +97,10 @@
                 <button id="btnReset" class="btn btnGhost">Reset</button>
               </div>
             </div>
+              <div id="searchContainer" class="searchContainer">
+                <input id="placeSearch" class="chatInput" placeholder="🔍 Search places in Kathmandu…" autocomplete="off" />
+                <div id="searchResults" class="searchResults"></div>
+              </div>
               <div id="chatLog" class="chatLog"></div>
               <form id="chatForm" class="chatForm">
                 <input id="chatInput" class="chatInput" placeholder="Ask about Kathmandu…" autocomplete="off" />
@@ -115,6 +117,8 @@
                 💡 <strong>Tip:</strong> Click map markers to select places • Right-click to set your hotel • Say "I like [place name]" in chat to add locations
               </div>
             </div>
+
+            <div id="map" class="map"></div>
           </div>
         </section>
       </main>

@@ -35,6 +35,18 @@ USE_LLM = os.environ.get("NOMADAI_USE_LLM", "0") == "1"
 # Toggle for using Gemini API instead of Ollama
 USE_GEMINI = os.environ.get("USE_GEMINI", "1") == "1"
 
+# Foursquare API configuration
+FOURSQUARE_API_KEY = (
+    os.environ.get("FOURSQUARE_API_KEY", "")
+    or os.environ.get("FOURSQUARE_API_TOKEN", "")
+    or os.environ.get("FOURSQUARE_API_SECRET", "")
+)
+FOURSQUARE_USE_API = bool(FOURSQUARE_API_KEY)
+
+# Simple in-memory cache for Foursquare API responses (TTL: 1 hour)
+_foursquare_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+CACHE_TTL_SECONDS = 3600  # 1 hour
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
@@ -355,6 +367,11 @@ def _has_buildable_trip(trip_state: Dict[str, Any]) -> bool:
     """True if user has hotel and at least one confirmed day (can build route)."""
     if not isinstance(trip_state, dict) or not trip_state.get("hotel"):
         return False
+
+    selected_places = trip_state.get("selected_places")
+    if isinstance(selected_places, list) and len(selected_places) > 0:
+        return True
+
     trip = trip_state.get("trip")
     if not isinstance(trip, dict):
         return False
@@ -1945,6 +1962,26 @@ def export_plan(request: Request) -> JSONResponse:
             continue
         links.append({"day": day_index, "url": url})
 
+    # Fallback: if the user hasn't confirmed days yet, still allow exporting a single route
+    # based on selected places (hotel -> up to 4 selected places).
+    if not links and hotel_coords:
+        coords2: List[List[float]] = [hotel_coords]
+        selected = trip_state.get("selected_places") if isinstance(trip_state, dict) else None
+        if isinstance(selected, list):
+            for p in selected[:4]:
+                if not isinstance(p, dict):
+                    continue
+                c = p.get("coordinates")
+                if isinstance(c, list) and len(c) == 2:
+                    try:
+                        coords2.append([float(c[0]), float(c[1])])
+                    except Exception:
+                        continue
+        if len(coords2) >= 2:
+            url2 = _google_maps_dir_link(coords2)
+            if url2:
+                links.append({"day": 1, "url": url2})
+
     return JSONResponse({"ok": True, "days": len(days_list), "links": links})
 
 
@@ -1998,12 +2035,143 @@ async def plan(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "plan": plan_obj, "session_id": session_id})
 
 
+async def _fetch_foursquare_place_details(lat: float, lng: float, name: str) -> Optional[Dict[str, Any]]:
+    """Fetch place details from Foursquare Places API with caching."""
+    if not FOURSQUARE_USE_API:
+        return None
+    
+    # Check cache first
+    cache_key = f"{lat:.4f},{lng:.4f}:{name}"
+    current_time = datetime.datetime.now().timestamp()
+    if cache_key in _foursquare_cache:
+        cached_data, cached_time = _foursquare_cache[cache_key]
+        if current_time - cached_time < CACHE_TTL_SECONDS:
+            return cached_data
+    
+    try:
+        # Use Foursquare Places API v3
+        url = "https://api.foursquare.com/v3/places/search"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": FOURSQUARE_API_KEY,
+        }
+        params = {
+            "ll": f"{lat},{lng}",
+            "query": name,
+            "limit": 1,
+            "radius": 1000,
+            "fields": "fsq_id,name,location,geocodes,categories,rating,website",
+        }
+        
+        timeout = httpx.Timeout(5.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("results", [])
+                if results:
+                    place = results[0]
+                    geocodes = place.get("geocodes") or {}
+                    main_geo = geocodes.get("main") if isinstance(geocodes, dict) else None
+                    if not isinstance(main_geo, dict):
+                        main_geo = {}
+
+                    # Get basic place info
+                    fsq_id = place.get("fsq_id")
+                    if fsq_id:
+                        # Fetch photos for this place
+                        photos_url = f"https://api.foursquare.com/v3/places/{fsq_id}/photos"
+                        photos_response = await client.get(photos_url, headers=headers, params={"limit": 3})
+                        photos = []
+                        if photos_response.status_code == 200:
+                            photos_data = photos_response.json()
+                            items = []
+                            if isinstance(photos_data, list):
+                                items = photos_data
+                            elif isinstance(photos_data, dict):
+                                items = photos_data.get("results") or []
+                            for photo in items[:3]:
+                                prefix = photo.get("prefix", "")
+                                suffix = photo.get("suffix", "")
+                                if prefix and suffix:
+                                    photos.append(f"{prefix}300x300{suffix}")
+                        
+                        result = {
+                            "fsq_id": fsq_id,
+                            "name": place.get("name", name),
+                            "address": place.get("location", {}).get("formatted_address", ""),
+                            "lat": main_geo.get("latitude"),
+                            "lng": main_geo.get("longitude"),
+                            "category": place.get("categories", [{}])[0].get("name", "") if place.get("categories") else "",
+                            "rating": place.get("rating", 0),
+                            "photos": photos,
+                            "website": place.get("website", ""),
+                        }
+                        # Cache the result
+                        _foursquare_cache[cache_key] = (result, current_time)
+                        return result
+    except Exception as e:
+        print(f"Foursquare API error: {e}")
+    return None
+
+
+async def _search_foursquare_places(query: str, lat: float = 27.7172, lng: float = 85.3240) -> List[Dict[str, Any]]:
+    """Search for places using Foursquare Places API."""
+    if not FOURSQUARE_USE_API:
+        return []
+    
+    try:
+        url = "https://api.foursquare.com/v3/places/search"
+        headers = {
+            "Accept": "application/json",
+            "Authorization": FOURSQUARE_API_KEY,
+        }
+        params = {
+            "ll": f"{lat},{lng}",
+            "query": query,
+            "limit": 10,
+            "radius": 5000,  # 5km radius
+            "fields": "fsq_id,name,location,geocodes,categories,rating",
+        }
+        
+        timeout = httpx.Timeout(5.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                results = []
+                for place in data.get("results", [])[:10]:
+                    location = place.get("location", {})
+                    geocodes = place.get("geocodes") or {}
+                    main_geo = geocodes.get("main") if isinstance(geocodes, dict) else None
+                    if not isinstance(main_geo, dict):
+                        main_geo = {}
+                    results.append({
+                        "fsq_id": place.get("fsq_id"),
+                        "name": place.get("name", ""),
+                        "address": location.get("formatted_address", ""),
+                        "lat": main_geo.get("latitude"),
+                        "lng": main_geo.get("longitude"),
+                        "category": place.get("categories", [{}])[0].get("name", "") if place.get("categories") else "",
+                        "rating": place.get("rating", 0),
+                    })
+                return results
+            else:
+                try:
+                    print(f"Foursquare search HTTP {response.status_code}: {response.text[:200]}")
+                except Exception:
+                    print(f"Foursquare search HTTP {response.status_code}")
+    except Exception as e:
+        print(f"Foursquare search error: {e}")
+    return []
+
+
 def index(request: Request) -> Response:
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 def health(request: Request) -> JSONResponse:
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "foursquare_enabled": bool(FOURSQUARE_USE_API)})
 
 
 def pois(request: Request) -> JSONResponse:
@@ -2011,7 +2179,75 @@ def pois(request: Request) -> JSONResponse:
 
 
 def places(request: Request) -> JSONResponse:
-    return JSONResponse({"places": list(PLACES.values())})
+    """Return places list. Photos are fetched on-demand via /api/place/details endpoint."""
+    places_list = list(PLACES.values())
+    return JSONResponse({"places": places_list})
+
+
+async def place_details(request: Request) -> JSONResponse:
+    """Get detailed information about a place including photos from Foursquare."""
+    place_id = request.query_params.get("place_id")
+    if not place_id:
+        return JSONResponse({"error": "place_id required"}, status_code=400)
+    
+    place = PLACES.get(place_id)
+    if not place:
+        return JSONResponse({"error": "Place not found"}, status_code=404)
+    
+    # Fetch Foursquare details if available
+    foursquare_data = None
+    if FOURSQUARE_USE_API:
+        foursquare_data = await _fetch_foursquare_place_details(
+            place.get("lat", 0),
+            place.get("lng", 0),
+            place.get("name_en", "")
+        )
+    
+    result = {**place}
+    if foursquare_data:
+        result["foursquare"] = foursquare_data
+        # Merge photos if available
+        if foursquare_data.get("photos"):
+            result["images"] = foursquare_data["photos"]
+    
+    return JSONResponse(result)
+
+
+async def search_places(request: Request) -> JSONResponse:
+    """Search for places using Foursquare API."""
+    query = request.query_params.get("q", "").strip()
+    if not query:
+        return JSONResponse({"error": "query parameter 'q' required"}, status_code=400)
+    
+    lat = float(request.query_params.get("lat", KATHMANDU_CENTER[0]))
+    lng = float(request.query_params.get("lng", KATHMANDU_CENTER[1]))
+    
+    results = await _search_foursquare_places(query, lat, lng)
+    if results:
+        return JSONResponse({"results": results, "source": "foursquare"})
+
+    # Fallback: local POIs search so the UI still works even without Foursquare.
+    q = query.lower()
+    local: List[Dict[str, Any]] = []
+    for p in PLACES.values():
+        name = str(p.get("name_en") or "")
+        if not name:
+            continue
+        if q in name.lower():
+            local.append(
+                {
+                    "fsq_id": None,
+                    "name": name,
+                    "address": "Kathmandu, Nepal",
+                    "lat": p.get("lat"),
+                    "lng": p.get("lng"),
+                    "category": p.get("category", ""),
+                    "rating": 0,
+                }
+            )
+        if len(local) >= 10:
+            break
+    return JSONResponse({"results": local, "source": "local"})
 
 
 async def chat(request: Request) -> JSONResponse:
@@ -2355,6 +2591,9 @@ async def chat(request: Request) -> JSONResponse:
             _set_map_view(trip_state, coords, zoom=15)
             trip_state["stage"] = "exploring"
 
+            if _has_buildable_trip(trip_state):
+                commands.append({"ui.enableButton": "buildRoute"})
+
             pid = _place_id(name)
             day_index = _current_day_index(trip_state)
             ok, reason = _add_visit_to_day(trip_state, day_index, pid)
@@ -2376,7 +2615,12 @@ async def chat(request: Request) -> JSONResponse:
             if place:
                 commands.append({"map.addPin": {"id": pid, "lat": place["lat"], "lng": place["lng"], "type": "visit", "color": "blue", "label": place["name_en"]}})
                 commands.append({"map.zoomTo": {"lat": place["lat"], "lng": place["lng"], "zoom": 15}})
-                commands.append({"ui.showImages": {"placeId": pid, "urls": place.get("images") or []}})
+                urls = place.get("images") or []
+                if (not urls) and FOURSQUARE_USE_API:
+                    fs = await _fetch_foursquare_place_details(float(place["lat"]), float(place["lng"]), str(place.get("name_en") or ""))
+                    if fs and isinstance(fs.get("photos"), list):
+                        urls = fs.get("photos")
+                commands.append({"ui.showImages": {"placeId": pid, "urls": urls or []}})
                 commands.append({"ui.showReview": {"placeId": pid, "review": str(place.get("review") or "")}})
                 commands.append({"session.addPlaceToDay": {"dayIndex": day_index, "placeId": pid}})
 
@@ -2418,10 +2662,32 @@ async def chat(request: Request) -> JSONResponse:
             )
 
         if et == "set_hotel":
-            reply = (
-                "For this prototype, please choose your stay area in chat (Thamel / Near Boudha / Near Durbar Square). "
-                "Once you pick one, I’ll set it as your start point (green pin)."
-            )
+            name = str(map_event.get("name", "")).strip() or "Stay"
+            coords = map_event.get("coordinates")
+            if not (isinstance(coords, list) and len(coords) == 2):
+                reply = (
+                    "For this prototype, please choose your stay area in chat (Thamel / Near Boudha / Near Durbar Square). "
+                    "Once you pick one, I’ll set it as your start point (green pin)."
+                )
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": reply,
+                        "reply": reply,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
+                    }
+                )
+
+            _set_hotel(trip_state, name, [float(coords[0]), float(coords[1])])
+            _set_map_view(trip_state, [float(coords[0]), float(coords[1])], zoom=14)
+            commands.append({"map.addPin": {"id": "hotel", "lat": float(coords[0]), "lng": float(coords[1]), "type": "hotel", "color": "green", "label": name}})
+            commands.append({"session.storeHotel": {"dayIndex": _current_day_index(trip_state), "placeId": "hotel", "name_en": name, "lat": float(coords[0]), "lng": float(coords[1])}})
+            if _has_buildable_trip(trip_state):
+                commands.append({"ui.enableButton": "buildRoute"})
+            reply = "Stay point saved. Now add a couple of places (via search or clicking markers), then use ‘Open routes in Maps’."
             return JSONResponse(
                 {
                     "session_id": session_id,
@@ -2430,21 +2696,26 @@ async def chat(request: Request) -> JSONResponse:
                     "commands": commands,
                     "trip_state": trip_state,
                     "map_actions": _map_actions_from_state(trip_state),
-                    "suggestions": ["I'm staying in Thamel", "I'm staying near Boudha", "I'm staying near Durbar Square"],
+                    "suggestions": [],
                 }
             )
 
         if et == "create_route":
-            trip_state["routes"] = await _build_routes_for_confirmed_days(trip_state)
+            routes = await _build_routes_for_confirmed_days(trip_state)
+            if not routes:
+                try:
+                    routes = await _build_routes_osrm(trip_state)
+                except Exception:
+                    routes = []
+            trip_state["routes"] = routes
             trip_state["stage"] = "planning" if trip_state.get("routes") else trip_state.get("stage", "exploring")
 
-            if not _is_trip_complete(trip_state):
-                reply = "Finish confirming your days first, then I can build clean routes for each day."
-            elif not trip_state.get("routes"):
-                reply = "I couldn’t build the route yet — please make sure each confirmed day has 1–2 visiting stops."
+            if _has_buildable_trip(trip_state):
+                commands.append({"ui.enableButton": "buildRoute"})
+            if trip_state.get("routes"):
+                reply = "Done — I built routes. Use the Export section to open them in Google Maps."
             else:
-                commands.append({"ui.enableButton": "export"})
-                reply = "Done — your day-by-day routes are ready. You can now export each day to Google Maps."
+                reply = "I couldn’t build the route yet — please set a stay point and add at least one place."
 
             return JSONResponse(
                 {
@@ -2687,6 +2958,8 @@ routes = [
     Route("/api/health", endpoint=health, methods=["GET"]),
     Route("/api/pois", endpoint=pois, methods=["GET"]),
     Route("/api/places", endpoint=places, methods=["GET"]),
+    Route("/api/place/details", endpoint=place_details, methods=["GET"]),
+    Route("/api/places/search", endpoint=search_places, methods=["GET"]),
     Route("/api/chat", endpoint=chat, methods=["POST"]),
     Route("/api/export", endpoint=export_plan, methods=["GET"]),
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),

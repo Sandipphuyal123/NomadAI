@@ -6,6 +6,8 @@ const btnReset = document.getElementById('btnReset');
 const btnCalendar = document.getElementById('btnCalendar');
 const suggestionsEl = document.getElementById('suggestions');
 const exportLinksEl = document.getElementById('exportLinks');
+const placeSearch = document.getElementById('placeSearch');
+const searchResults = document.getElementById('searchResults');
 
 const screenLanding = document.getElementById('screenLanding');
 const screenPlanner = document.getElementById('screenPlanner');
@@ -51,14 +53,11 @@ const wizardState = {
 };
 
 const map = L.map('map', { zoomControl: true }).setView([27.7172, 85.3240], 13);
-// Satellite imagery with labels overlay for readability.
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+// OpenStreetMap tiles - free and open source
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
-  attribution: 'Tiles &copy; Esri'
-}).addTo(map);
-L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
-  maxZoom: 19,
-  attribution: 'Labels &copy; Esri'
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  subdomains: ['a', 'b', 'c']
 }).addTo(map);
 
 const markerLayer = L.layerGroup().addTo(map);
@@ -67,6 +66,8 @@ const routeLayer = L.layerGroup().addTo(map);
 const mapPins = {};
 
 let isPersonalizedGuide = false;
+
+let activeWizardStepEl = null;
 
 function show(el) {
   if (!el) return;
@@ -79,6 +80,10 @@ function hide(el) {
 }
 
 function setWizardStep(step) {
+  const prev = activeWizardStepEl;
+  const next = step === 1 ? wizardStep1 : step === 2 ? wizardStep2 : wizardStep3;
+  if (!next) return;
+
   wizardState.step = step;
   if (wizardBar) {
     const pct = step === 1 ? 33.33 : step === 2 ? 66.66 : 100;
@@ -87,20 +92,77 @@ function setWizardStep(step) {
   if (wizBack) wizBack.disabled = step === 1;
   if (wizNext) wizNext.textContent = step === 3 ? 'Generate Plan ✓' : 'Continue →';
 
-  if (wizardStep1) wizardStep1.classList.toggle('isHidden', step !== 1);
-  if (wizardStep2) wizardStep2.classList.toggle('isHidden', step !== 2);
-  if (wizardStep3) wizardStep3.classList.toggle('isHidden', step !== 3);
+  if (wizardStep1) wizardStep1.classList.remove('isHidden');
+  if (wizardStep2) wizardStep2.classList.remove('isHidden');
+  if (wizardStep3) wizardStep3.classList.remove('isHidden');
+
+  if (prev && prev !== next) {
+    prev.classList.remove('isActive');
+    prev.classList.add('isLeaving');
+    setTimeout(() => {
+      prev.classList.remove('isLeaving');
+      prev.classList.add('isHidden');
+    }, 260);
+  }
+
+  next.classList.remove('isHidden');
+  requestAnimationFrame(() => {
+    next.classList.add('isActive');
+  });
+
+  activeWizardStepEl = next;
+  syncWizardChoiceUI();
+  updateWizardNextState();
 }
 
 function openWizard() {
   if (wizDestination) wizDestination.value = wizardState.destination;
   if (wizDays) wizDays.value = String(wizardState.days || 2);
-  show(wizardOverlay);
+  if (!wizardOverlay) return;
+  wizardOverlay.classList.remove('isHidden');
+  requestAnimationFrame(() => {
+    wizardOverlay.classList.add('isOpen');
+  });
+  activeWizardStepEl = null;
   setWizardStep(1);
 }
 
 function closeWizard() {
-  hide(wizardOverlay);
+  if (!wizardOverlay) return;
+  wizardOverlay.classList.remove('isOpen');
+  setTimeout(() => {
+    wizardOverlay.classList.add('isHidden');
+  }, 240);
+}
+
+function syncWizardChoiceUI() {
+  if (!wizardOverlay) return;
+  const b = wizardState.budget;
+  const g = wizardState.group;
+  wizardOverlay.querySelectorAll('[data-budget]').forEach((btn) => {
+    btn.classList.toggle('isActive', (btn.getAttribute('data-budget') || '') === b);
+  });
+  wizardOverlay.querySelectorAll('[data-group]').forEach((btn) => {
+    btn.classList.toggle('isActive', (btn.getAttribute('data-group') || '') === g);
+  });
+}
+
+function _validWizardDays() {
+  const d = parseInt(String(wizardState.days || ''), 10);
+  return Number.isFinite(d) && d >= 1 && d <= 14;
+}
+
+function updateWizardNextState() {
+  if (!wizNext) return;
+  let ok = true;
+  if (wizardState.step === 1) {
+    ok = _validWizardDays();
+  } else if (wizardState.step === 2) {
+    ok = ['budget', 'mid', 'luxury'].includes(String(wizardState.budget || ''));
+  } else if (wizardState.step === 3) {
+    ok = ['solo', 'couple', 'family', 'friends'].includes(String(wizardState.group || ''));
+  }
+  wizNext.disabled = !ok;
 }
 
 function mapsSearchUrl(name) {
@@ -464,25 +526,52 @@ async function bootPlannerWithWizardState() {
   addMsg('assistant', data.message || data.reply);
 }
 
-function pinIcon(color, label) {
+function pinIcon(color, label, photoUrl = null) {
   const bg = color === 'green' ? '#10b981' : '#3b82f6';
   const text = String(label || '').slice(0, 2).toUpperCase();
-  const html = `
-    <div style="
-      width: 32px; height: 32px; border-radius: 999px;
-      background: ${bg};
-      border: 2px solid rgba(255,255,255,0.9);
-      box-shadow: 0 6px 14px rgba(0,0,0,0.25);
-      display: flex; align-items: center; justify-content: center;
-      font-weight: 700; color: white; font-size: 12px;
-    ">${text}</div>
-  `;
+  
+  let html;
+  if (photoUrl) {
+    html = `
+      <div style="
+        width: 40px; height: 40px; border-radius: 999px;
+        background-image: url('${photoUrl}');
+        background-size: cover;
+        background-position: center;
+        border: 3px solid rgba(255,255,255,0.95);
+        box-shadow: 0 6px 14px rgba(0,0,0,0.3);
+        display: flex; align-items: center; justify-content: center;
+        overflow: hidden;
+      ">
+        <div style="
+          width: 100%; height: 100%;
+          background: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.3) 100%);
+          display: flex; align-items: flex-end; justify-content: center;
+          padding-bottom: 4px;
+          font-weight: 700; color: white; font-size: 10px;
+          text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        ">${text}</div>
+      </div>
+    `;
+  } else {
+    html = `
+      <div style="
+        width: 32px; height: 32px; border-radius: 999px;
+        background: ${bg};
+        border: 2px solid rgba(255,255,255,0.9);
+        box-shadow: 0 6px 14px rgba(0,0,0,0.25);
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; color: white; font-size: 12px;
+      ">${text}</div>
+    `;
+  }
+  
   return L.divIcon({
     className: '',
     html,
-    iconSize: [32, 32],
-    iconAnchor: [16, 16],
-    popupAnchor: [0, -16]
+    iconSize: photoUrl ? [40, 40] : [32, 32],
+    iconAnchor: photoUrl ? [20, 20] : [16, 16],
+    popupAnchor: [0, photoUrl ? -20 : -16]
   });
 }
 
@@ -498,7 +587,6 @@ function _placeLatLng(place) {
 }
 
 function syncPinsFromTripState(tripState) {
-  if (!isPersonalizedGuide) return;
   if (!tripState || typeof tripState !== 'object') return;
 
   const desired = new Set();
@@ -547,8 +635,40 @@ function syncPinsFromTripState(tripState) {
     const place = (placesIndex && placesIndex[id]) ? placesIndex[id] : null;
     const ll = _placeLatLng(place);
     if (!ll) continue;
+    
+    // Fetch place details with photos asynchronously
+    fetchPlaceDetailsWithPhoto(id, place, ll[0], ll[1]);
+  }
+}
+
+async function fetchPlaceDetailsWithPhoto(placeId, place, lat, lng) {
+  try {
+    const response = await fetch(`/api/place/details?place_id=${encodeURIComponent(placeId)}`);
+    if (response.ok) {
+      const data = await response.json();
+      const photoUrl = (data.images && data.images.length > 0) ? data.images[0] : 
+                       (data.foursquare && data.foursquare.photos && data.foursquare.photos.length > 0) ? data.foursquare.photos[0] : null;
+      
+      executeCommands([
+        { 'map.addPin': { 
+          id: placeId, 
+          lat, 
+          lng, 
+          type: 'visit', 
+          label: place && place.name_en ? place.name_en : placeId,
+          photoUrl: photoUrl
+        } }
+      ]);
+    } else {
+      // Fallback without photo
+      executeCommands([
+        { 'map.addPin': { id: placeId, lat, lng, type: 'visit', label: place && place.name_en ? place.name_en : placeId } }
+      ]);
+    }
+  } catch (error) {
+    // Fallback without photo on error
     executeCommands([
-      { 'map.addPin': { id, lat: ll[0], lng: ll[1], type: 'visit', label: place && place.name_en ? place.name_en : id } }
+      { 'map.addPin': { id: placeId, lat, lng, type: 'visit', label: place && place.name_en ? place.name_en : placeId } }
     ]);
   }
 }
@@ -562,6 +682,7 @@ function bindWizardChoices() {
       const v = btn.getAttribute('data-budget') || 'flexible';
       wizardState.budget = v;
       wizardOverlay.querySelectorAll('[data-budget]').forEach((b) => b.classList.toggle('isActive', b === btn));
+      updateWizardNextState();
     });
   });
 
@@ -571,6 +692,7 @@ function bindWizardChoices() {
       const v = btn.getAttribute('data-group') || 'solo';
       wizardState.group = v;
       wizardOverlay.querySelectorAll('[data-group]').forEach((b) => b.classList.toggle('isActive', b === btn));
+      updateWizardNextState();
     });
   });
 }
@@ -593,7 +715,7 @@ function executeCommands(commands) {
     }
 
     if (k === 'map.addPin' && payload) {
-      const { id, lat, lng, label, type } = payload;
+      const { id, lat, lng, label, type, photoUrl } = payload;
       if (!id || !Number.isFinite(lat) || !Number.isFinite(lng)) continue;
       if (mapPins[id]) {
         markerLayer.removeLayer(mapPins[id]);
@@ -601,8 +723,20 @@ function executeCommands(commands) {
       }
       const pinColor = type === 'hotel' ? 'green' : 'blue';
       const shortLabel = type === 'hotel' ? 'H' : 'V';
-      const marker = L.marker([lat, lng], { icon: pinIcon(pinColor, shortLabel) }).addTo(markerLayer);
-      if (label) marker.bindPopup(String(label));
+      
+      // Create popup content with photo if available
+      let popupContent = String(label || '');
+      if (photoUrl) {
+        popupContent = `
+          <div style="text-align: center;">
+            <img src="${photoUrl}" style="width: 200px; height: 150px; object-fit: cover; border-radius: 8px; margin-bottom: 8px;" />
+            <div style="font-weight: 600; margin-top: 4px;">${label || ''}</div>
+          </div>
+        `;
+      }
+      
+      const marker = L.marker([lat, lng], { icon: pinIcon(pinColor, shortLabel, photoUrl) }).addTo(markerLayer);
+      marker.bindPopup(popupContent, { maxWidth: 250 });
       mapPins[id] = marker;
       continue;
     }
@@ -788,23 +922,16 @@ function renderExportLinks(payload) {
 async function exportToGoogleMaps() {
   if (!sessionId) {
     renderExportLinks({ ok: false });
-    return;
+    return { ok: false };
   }
   const res = await fetch(`/api/export?session_id=${encodeURIComponent(sessionId)}`);
   if (!res.ok) {
     renderExportLinks({ ok: false });
-    return;
+    return { ok: false };
   }
   const data = await res.json();
   renderExportLinks(data);
-  const links = Array.isArray(data.links) ? data.links : [];
-  if (links.length > 0 && links[0].url) {
-    try {
-      window.open(links[0].url, '_blank', 'noreferrer');
-    } catch {
-      // ignore
-    }
-  }
+  return data;
 }
 
 async function loadPlaces() {
@@ -963,7 +1090,11 @@ async function buildAndOpenRoutes() {
     });
     addMsg('assistant', data.message || data.reply);
     applyServerResponse(data);
-    await exportToGoogleMaps();
+    const exportData = await exportToGoogleMaps();
+    const links = exportData && Array.isArray(exportData.links) ? exportData.links : [];
+    if (links.length > 0) {
+      addMsg('assistant', 'Routes are ready. Use the Export section below to open each day in Google Maps.');
+    }
   } catch (error) {
     console.error('buildAndOpenRoutes error:', error);
     addMsg('assistant', 'Sorry — I could not build or open the routes. Please confirm your days and try again.');
@@ -994,43 +1125,159 @@ async function resetSession() {
   await bootPlannerWithWizardState();
 }
 
+function formatDateForGoogleCalendar(date) {
+  // Format: YYYYMMDDTHHmmssZ (UTC)
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const hours = String(date.getUTCHours()).padStart(2, '0');
+  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${year}${month}${day}T${hours}${minutes}${seconds}Z`;
+}
+
+function createGoogleCalendarLink(title, description, startDate, endDate, location) {
+  const baseUrl = 'https://calendar.google.com/calendar/render';
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: title,
+    dates: `${formatDateForGoogleCalendar(startDate)}/${formatDateForGoogleCalendar(endDate)}`,
+    details: description,
+    location: location || 'Kathmandu, Nepal',
+    sf: 'true',
+    output: 'xml'
+  });
+  return `${baseUrl}?${params.toString()}`;
+}
+
 async function showTripDates() {
   if (!currentPlan || !Array.isArray(currentPlan.days)) {
     addMsg('assistant', 'I need a saved plan first. Please finish planning, then try again.');
     return;
   }
-  const input = window.prompt('When does your Kathmandu stay start? (YYYY-MM-DD)');
+  
+  // Create a better date picker UI
+  const input = window.prompt('When does your Kathmandu stay start? (YYYY-MM-DD)\n\nExample: 2026-03-15');
   if (!input) return;
-  const start = new Date(input);
+  
+  const start = new Date(input + 'T09:00:00'); // Default to 9 AM
   if (Number.isNaN(start.getTime())) {
     addMsg('assistant', 'That date did not look valid. Please use format YYYY-MM-DD.');
     return;
   }
+  
+  const calendarLinks = [];
   const lines = [];
   const daysArr = currentPlan.days.slice().sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
+  
   for (const day of daysArr) {
     const idx = day.dayIndex || 1;
-    const d = new Date(start.getTime());
-    d.setDate(d.getDate() + (idx - 1));
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
+    const dayDate = new Date(start.getTime());
+    dayDate.setDate(dayDate.getDate() + (idx - 1));
+    
+    const y = dayDate.getFullYear();
+    const m = String(dayDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(dayDate.getDate()).padStart(2, '0');
     const dateStr = `${y}-${m}-${dd}`;
+    
     const visitIds = (day.visits || []).slice(0, 2);
     const names = [];
+    const locations = [];
+    
+    // Add hotel as starting point
     names.push('Hotel / Stay');
+    
+    // Add visit places
     for (const pid of visitIds) {
       const p = placesIndex[pid];
-      if (p && p.name_en) names.push(p.name_en);
+      if (p && p.name_en) {
+        names.push(p.name_en);
+        locations.push(p.name_en);
+      }
     }
-    lines.push(`${dateStr}: ${names.join(' → ')}`);
+    
+    const dayTitle = `Day ${idx}: ${names.slice(1).join(' → ')}`;
+    const dayDescription = `Kathmandu Trip - Day ${idx}\n\nPlaces to visit:\n${names.map((n, i) => `${i + 1}. ${n}`).join('\n')}\n\n${currentPlan.days[idx - 1]?.cost_npr ? `Estimated cost: NPR ${currentPlan.days[idx - 1].cost_npr.min || 0}-${currentPlan.days[idx - 1].cost_npr.max || 0}` : ''}`;
+    
+    // Create start and end times for the day (9 AM to 6 PM)
+    const dayStart = new Date(dayDate);
+    dayStart.setHours(9, 0, 0, 0);
+    const dayEnd = new Date(dayDate);
+    dayEnd.setHours(18, 0, 0, 0);
+    
+    const calendarLink = createGoogleCalendarLink(
+      dayTitle,
+      dayDescription,
+      dayStart,
+      dayEnd,
+      locations.join(', ') || 'Kathmandu, Nepal'
+    );
+    
+    calendarLinks.push({
+      day: idx,
+      date: dateStr,
+      title: dayTitle,
+      link: calendarLink,
+      places: names
+    });
+    
+    lines.push(`Day ${idx} (${dateStr}): ${names.join(' → ')}`);
   }
-  addMsg('assistant', `Trip calendar (Kathmandu):\n` + lines.join('\n'));
-  try {
-    // Open Google Calendar so the traveler can paste these lines into events.
-    window.open('https://calendar.google.com/calendar/u/0/r', '_blank', 'noreferrer');
-  } catch {
-    // ignore
+  
+  // Display calendar summary
+  addMsg('assistant', `📅 Trip Calendar for Kathmandu:\n\n${lines.join('\n')}\n\nClick the links below to add each day to your Google Calendar:`);
+  
+  // Create clickable calendar links
+  const calendarDiv = document.createElement('div');
+  calendarDiv.className = 'msg assistant';
+  calendarDiv.style.cssText = 'margin-top: 12px; padding: 12px; background: #f8f9fa; border-radius: 8px;';
+  
+  for (const item of calendarLinks) {
+    const linkEl = document.createElement('a');
+    linkEl.href = item.link;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noreferrer';
+    linkEl.className = 'exportLink';
+    linkEl.style.cssText = 'display: block; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px; text-decoration: none; color: #6366f1; font-weight: 500;';
+    linkEl.textContent = `📅 Add Day ${item.day} (${item.date}) to Google Calendar`;
+    linkEl.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.open(item.link, '_blank', 'noreferrer');
+    });
+    calendarDiv.appendChild(linkEl);
+  }
+  
+  chatLog.appendChild(calendarDiv);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  
+  // Also create a combined calendar link for the entire trip
+  if (calendarLinks.length > 0) {
+    const firstDay = new Date(start);
+    firstDay.setHours(9, 0, 0, 0);
+    const lastDay = new Date(start);
+    lastDay.setDate(lastDay.getDate() + (daysArr.length - 1));
+    lastDay.setHours(18, 0, 0, 0);
+    
+    const allDaysLink = createGoogleCalendarLink(
+      `Kathmandu Trip - ${daysArr.length} Days`,
+      `Complete itinerary for ${daysArr.length} days in Kathmandu.\n\n${lines.join('\n')}`,
+      firstDay,
+      lastDay,
+      'Kathmandu, Nepal'
+    );
+
+    const allDaysLinkEl = document.createElement('a');
+    allDaysLinkEl.href = allDaysLink;
+    allDaysLinkEl.target = '_blank';
+    allDaysLinkEl.rel = 'noreferrer';
+    allDaysLinkEl.className = 'exportLink';
+    allDaysLinkEl.style.cssText = 'display: block; margin-top: 8px; padding: 10px; background: #6366f1; color: white; border-radius: 4px; text-decoration: none; font-weight: 600; text-align: center;';
+    allDaysLinkEl.textContent = '📅 Add Entire Trip to Google Calendar';
+    allDaysLinkEl.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.open(allDaysLink, '_blank', 'noreferrer');
+    });
+    calendarDiv.appendChild(allDaysLinkEl);
   }
 }
 
@@ -1048,7 +1295,15 @@ if (btnReset) btnReset.addEventListener('click', resetSession);
 if (btnCalendar) btnCalendar.addEventListener('click', showTripDates);
 
 map.on('contextmenu', async (e) => {
-  addMsg('assistant', "To set your stay point, please choose an area in chat (Thamel / Near Boudha / Near Durbar Square)." );
+  try {
+    if (e && e.originalEvent && typeof e.originalEvent.preventDefault === 'function') {
+      e.originalEvent.preventDefault();
+    }
+  } catch {}
+  addMsg('assistant', 'Setting your stay point here. (Tip: right-click anywhere to change it.)');
+  if (e && e.latlng) {
+    await setHotel(e.latlng);
+  }
 });
 
 bindWizardChoices();
@@ -1075,10 +1330,27 @@ if (wizNext) {
       return;
     }
 
+    if (wizNext) {
+      wizNext.disabled = true;
+      wizNext.textContent = 'Generating…';
+    }
+    if (wizBack) wizBack.disabled = true;
+
     closeWizard();
     await fetchPlan();
     await loadPlaces();
     showResults();
+
+    if (wizNext) {
+      wizNext.textContent = 'Generate Plan ✓';
+    }
+  });
+}
+
+if (wizDays) {
+  wizDays.addEventListener('input', () => {
+    wizardState.days = parseInt(String(wizDays.value || '2'), 10) || 2;
+    updateWizardNextState();
   });
 }
 
@@ -1097,4 +1369,86 @@ if (btnEditChoices) {
   btnEditChoices.addEventListener('click', () => {
     openWizard();
   });
+}
+
+// Place search functionality
+let searchTimeout = null;
+if (placeSearch) {
+  placeSearch.addEventListener('input', async (e) => {
+    const query = e.target.value.trim();
+    
+    clearTimeout(searchTimeout);
+    
+    if (query.length < 2) {
+      searchResults.style.display = 'none';
+      return;
+    }
+    
+    searchTimeout = setTimeout(async () => {
+      try {
+        const center = map.getCenter();
+        const response = await fetch(`/api/places/search?q=${encodeURIComponent(query)}&lat=${center.lat}&lng=${center.lng}`);
+        if (response.ok) {
+          const data = await response.json();
+          displaySearchResults(data.results || []);
+        }
+      } catch (error) {
+        console.error('Search error:', error);
+      }
+    }, 300);
+  });
+  
+  // Hide search results when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!placeSearch.contains(e.target) && !searchResults.contains(e.target)) {
+      searchResults.style.display = 'none';
+    }
+  });
+}
+
+function displaySearchResults(results) {
+  if (!searchResults) return;
+  
+  searchResults.innerHTML = '';
+  
+  if (results.length === 0) {
+    searchResults.innerHTML = '<div style="padding: 12px; color: #666; text-align: center;">No places found</div>';
+    searchResults.style.display = 'block';
+    return;
+  }
+  
+  for (const place of results.slice(0, 5)) {
+    const item = document.createElement('div');
+    item.style.cssText = 'padding: 12px; cursor: pointer; border-bottom: 1px solid rgba(0,0,0,0.05); transition: background 0.2s;';
+    
+    item.innerHTML = `
+      <div style="font-weight: 600; margin-bottom: 4px;">${place.name || 'Unknown'}</div>
+      <div style="font-size: 12px; color: #666;">${place.address || ''}</div>
+      ${place.rating ? `<div style="font-size: 11px; color: #888; margin-top: 4px;">⭐ ${place.rating.toFixed(1)}</div>` : ''}
+    `;
+    
+    item.addEventListener('mouseenter', () => {
+      item.style.background = '#f5f5f5';
+    });
+    
+    item.addEventListener('mouseleave', () => {
+      item.style.background = 'white';
+    });
+    
+    item.addEventListener('click', async () => {
+      if (place.lat && place.lng) {
+        map.setView([place.lat, place.lng], 15, { animate: true });
+        await selectPlace({
+          name: place.name || 'Place',
+          coordinates: [place.lat, place.lng]
+        });
+      }
+      placeSearch.value = '';
+      searchResults.style.display = 'none';
+    });
+    
+    searchResults.appendChild(item);
+  }
+  
+  searchResults.style.display = 'block';
 }
