@@ -49,15 +49,17 @@ const wizardState = {
 };
 
 const map = L.map('map', { zoomControl: true }).setView([27.7172, 85.3240], 13);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
   maxZoom: 19,
-  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+  attribution: 'Tiles &copy; Esri'
 }).addTo(map);
 
 const markerLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
 
 const mapPins = {};
+
+let isPersonalizedGuide = false;
 
 function show(el) {
   if (!el) return;
@@ -174,6 +176,86 @@ function renderOverview() {
     row.appendChild(v);
     tripOverviewEl.appendChild(row);
   }
+}
+
+function getResultsHotelOptions() {
+  const hotel = hotelBudgetRangePerNight();
+  const options = wizardState.budget === 'luxury'
+    ? ['Dwarika\'s Hotel', 'Hyatt Regency Kathmandu', 'Kathmandu Marriott Hotel']
+    : wizardState.budget === 'mid'
+      ? ['Aloft Kathmandu Thamel', 'Baber Mahal Vilas', 'Hotel Tibet International']
+      : ['Kathmandu Guest House', 'Hotel Yala Peak', 'Thamel Boutique Hotel'];
+
+  const meta = {
+    "Dwarika's Hotel": { style: 'heritage luxury', bestFor: 'quiet, cultural atmosphere' },
+    'Hyatt Regency Kathmandu': { style: 'resort-style', bestFor: 'space, calm, full amenities' },
+    'Kathmandu Marriott Hotel': { style: 'international chain', bestFor: 'modern comfort and reliability' },
+    'Aloft Kathmandu Thamel': { style: 'modern lifestyle', bestFor: 'being in the center of Thamel' },
+    'Baber Mahal Vilas': { style: 'boutique heritage', bestFor: 'character and quieter evenings' },
+    'Hotel Tibet International': { style: 'classic comfort', bestFor: 'Boudha access and calmer pace' },
+    'Kathmandu Guest House': { style: 'classic budget', bestFor: 'walkable Thamel and value' },
+    'Hotel Yala Peak': { style: 'simple budget', bestFor: 'solo travelers and basics done well' },
+    'Thamel Boutique Hotel': { style: 'budget boutique', bestFor: 'Thamel convenience with comfort' },
+  };
+
+  return {
+    price_min_usd: hotel.min,
+    price_max_usd: hotel.max,
+    options: options.slice(0, 2).map((name) => ({ name, ...(meta[name] || {}) }))
+  };
+}
+
+function getResultsItinerary(days) {
+  const d = Math.max(1, Math.min(14, parseInt(String(days || 2), 10) || 2));
+  const picks = pickPlacesForDays(d);
+  const out = [];
+  for (let dayIndex = 1; dayIndex <= d; dayIndex++) {
+    const p1 = picks[(dayIndex - 1) * 2];
+    const p2 = picks[(dayIndex - 1) * 2 + 1];
+    const visits = [];
+    if (p1 && p1.id) visits.push(p1.id);
+    if (p2 && p2.id) visits.push(p2.id);
+    out.push({ dayIndex, visits });
+  }
+  return out;
+}
+
+async function bootPlannerAsPersonalizedGuide() {
+  hide(screenLanding);
+  hide(screenResults);
+  show(screenPlanner);
+
+  setTimeout(() => {
+    try { map.invalidateSize(true); } catch { }
+  }, 50);
+
+  if (!plannerBooted) {
+    plannerBooted = true;
+    await loadPlaces();
+  }
+
+  isPersonalizedGuide = true;
+
+  const days = Math.max(1, Math.min(14, parseInt(String(wizardState.days || 2), 10) || 2));
+  const comfort = wizardState.budget === 'budget' ? 'budget' : wizardState.budget === 'mid' ? 'mid' : wizardState.budget === 'luxury' ? 'comfortable' : null;
+  const groupCount = groupMultiplier();
+
+  const guideInit = {
+    destination: wizardState.destination || 'Kathmandu, Nepal',
+    profile: {
+      time_days: days,
+      group_label: wizardState.group || 'solo',
+      group_count: groupCount,
+      comfort,
+      budget_tier: wizardState.budget || 'flexible'
+    },
+    hotel_options: getResultsHotelOptions(),
+    itinerary: { days: getResultsItinerary(days) }
+  };
+
+  const data = await apiChat({ session_id: sessionId || null, message: '', guide_init: guideInit });
+  applyServerResponse(data);
+  addMsg('assistant', data.message || data.reply);
 }
 
 function renderHotelRecs() {
@@ -373,6 +455,73 @@ function pinIcon(color, label) {
     iconAnchor: [16, 16],
     popupAnchor: [0, -16]
   });
+}
+
+function _placeLatLng(place) {
+  if (!place || typeof place !== 'object') return null;
+  if (Number.isFinite(place.lat) && Number.isFinite(place.lng)) return [place.lat, place.lng];
+  if (Array.isArray(place.coordinates) && place.coordinates.length === 2) {
+    const lat = place.coordinates[0];
+    const lng = place.coordinates[1];
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+  }
+  return null;
+}
+
+function syncPinsFromTripState(tripState) {
+  if (!isPersonalizedGuide) return;
+  if (!tripState || typeof tripState !== 'object') return;
+
+  const desired = new Set();
+
+  const trip = tripState.trip;
+  const days = trip && typeof trip === 'object' ? trip.days : null;
+  if (Array.isArray(days)) {
+    for (const d of days) {
+      if (!d || typeof d !== 'object') continue;
+      const visits = d.visits;
+      if (!Array.isArray(visits)) continue;
+      for (const pid of visits) {
+        if (typeof pid !== 'string' || !pid) continue;
+        desired.add(pid);
+      }
+    }
+  }
+
+  const hotel = tripState.hotel;
+  if (hotel && typeof hotel === 'object' && hotel.coordinates && Array.isArray(hotel.coordinates) && hotel.coordinates.length === 2) {
+    desired.add('hotel');
+  }
+
+  for (const id of Object.keys(mapPins)) {
+    if (!desired.has(id)) {
+      markerLayer.removeLayer(mapPins[id]);
+      delete mapPins[id];
+    }
+  }
+
+  for (const id of desired) {
+    if (mapPins[id]) continue;
+
+    if (id === 'hotel') {
+      if (!(hotel && typeof hotel === 'object')) continue;
+      const coords = hotel.coordinates;
+      const lat = coords[0];
+      const lng = coords[1];
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      executeCommands([
+        { 'map.addPin': { id: 'hotel', lat, lng, type: 'hotel', label: hotel.name || 'Hotel' } }
+      ]);
+      continue;
+    }
+
+    const place = (placesIndex && placesIndex[id]) ? placesIndex[id] : null;
+    const ll = _placeLatLng(place);
+    if (!ll) continue;
+    executeCommands([
+      { 'map.addPin': { id, lat: ll[0], lng: ll[1], type: 'visit', label: place && place.name_en ? place.name_en : id } }
+    ]);
+  }
 }
 
 function bindWizardChoices() {
@@ -687,6 +836,7 @@ function applyServerResponse(data) {
   renderMapActions(data.map_actions);
   renderSuggestions(data.suggestions);
   executeCommands(data.commands);
+  syncPinsFromTripState(currentState);
 }
 
 async function sendUserMessage(text) {
@@ -805,7 +955,7 @@ hide(screenResults);
 
 if (btnPersonalizedGuide) {
   btnPersonalizedGuide.addEventListener('click', async () => {
-    await bootPlannerWithWizardState();
+    await bootPlannerAsPersonalizedGuide();
   });
 }
 

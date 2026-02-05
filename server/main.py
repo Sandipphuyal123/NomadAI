@@ -5,6 +5,7 @@ import math
 import os
 import re
 import urllib.parse
+import datetime
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -87,6 +88,21 @@ class SimpleRAG:
         return out
 
 
+def _message_mode(user_message: str) -> str:
+    m = str(user_message or "").strip().lower()
+    if not m:
+        return "general"
+    if any(k in m for k in ["tell me a story", "short story", "story about", "legend", "myth"]):
+        return "story"
+    if any(k in m for k in ["respect", "etiquette", "behave", "dress", "rules", "is it okay"]):
+        return "etiquette"
+    if any(k in m for k in ["vegetarian", "vegan", "food", "dinner", "lunch", "breakfast", "cafe", "restaurant"]):
+        return "food"
+    if any(k in m for k in ["plan", "itinerary", "day", "days", "budget", "hotel", "stay", "thamel", "boudha", "boudhanath", "durbar"]):
+        return "planning"
+    return "general"
+
+
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -107,6 +123,38 @@ def _story_for_place(name: str) -> Optional[Dict[str, Any]]:
         if str(s.get("place", "")).strip().lower() == str(name).strip().lower():
             return s
     return None
+
+
+def _story_from_query_hint(query: str) -> Optional[Dict[str, Any]]:
+    q = str(query or "").strip().lower()
+    if not q:
+        return None
+
+    poi = _find_poi_mention(q)
+    if poi and poi.get("name"):
+        story = _story_for_place(str(poi.get("name")))
+        if story:
+            return story
+
+    # Common Kathmandu aliases users type.
+    if "boudha" in q or "bouddha" in q or "boudhanath" in q:
+        return _story_for_place("Boudhanath Stupa")
+    if "swayambhu" in q or "monkey temple" in q or "swayambhunath" in q:
+        return _story_for_place("Swayambhunath (Monkey Temple)")
+    if "pashupati" in q or "pashupatinath" in q:
+        return _story_for_place("Pashupatinath Temple")
+    if "durbar" in q and "square" in q:
+        return _story_for_place("Kathmandu Durbar Square")
+
+    # If the query contains an exact story place substring, prefer that.
+    best: Optional[Dict[str, Any]] = None
+    best_len = 0
+    for s in STORIES:
+        name = str(s.get("place", "")).strip().lower()
+        if name and name in q and len(name) > best_len:
+            best = s
+            best_len = len(name)
+    return best
 
 
 def _short_story_text(text: str, max_len: int = 240) -> str:
@@ -153,6 +201,7 @@ def _default_trip_state() -> Dict[str, Any]:
     return {
         "city": "Kathmandu",
         "hotel": None,
+        "hotel_options": None,
         "selected_places": [],
         "routes": [],
         "stage": "exploring",
@@ -339,22 +388,167 @@ async def _ollama_chat(messages: List[Dict[str, str]]) -> str:
         "messages": messages, 
         "stream": False,
         "options": {
-            "temperature": 0.7,
-            "top_p": 0.9,
-            "max_tokens": 300,  # Limit response length for speed
-            "num_predict": 300   # Alternative max_tokens for some models
+            "temperature": 0.5,
+            "top_p": 0.85,
+            "repeat_penalty": 1.12,
+            "max_tokens": 600,
+            "num_predict": 600,
+            "stop": ["|RF|", "</s>"]
         }
     }
 
-    # Reduced timeout for faster failure detection
-    timeout = httpx.Timeout(30.0, connect=3.0)
+    timeout = httpx.Timeout(60.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{url}/api/chat", json=payload)
         r.raise_for_status()
         data = r.json()
         msg = data.get("message") or {}
         text = str(msg.get("content", "")).strip()
+        if "|RF|" in text:
+            text = text.split("|RF|", 1)[0].strip()
         return text
+
+
+HISTORY_MAX_MESSAGES = 12
+
+
+def _season_hint() -> str:
+    m = datetime.datetime.now().month
+    if 6 <= m <= 9:
+        return "monsoon"
+    if m in {12, 1, 2}:
+        return "winter"
+    if m in {3, 4, 5}:
+        return "spring"
+    return "autumn"
+
+
+def _push_history(history: List[Dict[str, str]], role: str, content: str) -> None:
+    if role not in {"user", "assistant"}:
+        return
+    c = str(content or "").strip()
+    if not c:
+        return
+    history.append({"role": role, "content": c})
+    if len(history) > HISTORY_MAX_MESSAGES:
+        del history[:-HISTORY_MAX_MESSAGES]
+
+
+def _history_for_llm(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for h in history[-HISTORY_MAX_MESSAGES:]:
+        if not isinstance(h, dict):
+            continue
+        r = h.get("role")
+        c = h.get("content")
+        if r in {"user", "assistant"} and isinstance(c, str) and c.strip():
+            out.append({"role": r, "content": c.strip()})
+    return out
+
+
+def _llm_system_prompt(trip_state: Dict[str, Any], user_message: str) -> str:
+    context = _context_for_llm(trip_state)
+    season = _season_hint()
+    mode = _message_mode(user_message)
+    hinted = _story_from_query_hint(user_message or "")
+
+    rag = ""
+    if hinted and mode == "story":
+        title = hinted.get("title") or hinted.get("place") or "Local story"
+        text = str(hinted.get("text") or "").strip()
+        if text:
+            rag = f"[{title}]\n{text}"
+    if not rag:
+        if hinted:
+            rag = _rag_text_for_query(str(hinted.get("place") or user_message or "Kathmandu"), top_k=1)
+        else:
+            rag = _rag_text_for_query(user_message or "Kathmandu travel", top_k=2)
+
+    extra = ""
+    if isinstance(trip_state, dict) and trip_state.get("planning_permission") is False:
+        extra = "\n\nIf the user declined planning, do not propose an itinerary; just answer questions briefly and helpfully."
+
+    if isinstance(trip_state, dict) and trip_state.get("ui_stage") == "guide":
+        extra += (
+            "\n\nGuide mode rules:" 
+            "\n- The user's itinerary is already planned. Do NOT ask them to choose places or propose a new itinerary." 
+            "\n- Focus on: hotel choice with reasons, what to expect each day, timing/comfort tips, fair prices, apps, etiquette, and safety." 
+            "\n- If the user asks to modify the trip, explain options clearly and ask only ONE clarifying question." 
+        )
+
+    sys = (
+        _system_prompt()
+        + "\n\nGrounding rules:" 
+        + "\n- If 'Relevant local knowledge' is provided below, treat it as the most reliable source and paraphrase it."
+        + "\n- Do not invent specific business names (cafes/hotels) unless the user provided the name or it appears in the provided POI list/context."
+        + "\n- If the user asks for a cafe/restaurant/shop and you are not sure of a specific name, recommend an area (Thamel, Patan, Boudha) and tell them how to quickly verify on Google Maps."
+        + "\n- Answer the user's question first. Then ask at most ONE follow-up question only if it is necessary to give better guidance (avoid a questionnaire)."
+        + f"\n- Current reply mode: {mode}. If mode is story/etiquette/food, do NOT switch into collecting days/budget/group unless the user explicitly asks for an itinerary."
+        + f"\n\nSeason hint: {season}.\n\nCurrent trip context: {context}"
+        + extra
+    )
+    if rag:
+        sys += "\n\nRelevant local knowledge:\n" + rag
+        if mode == "story":
+            sys += "\n\nStory rule: Base the story ONLY on the 'Relevant local knowledge' text. Do not invent names, dates, kings, merchants, or hidden treasures if they are not in the text."
+        if mode == "food":
+            sys += "\n\nFood rule: Do not name specific restaurants/cafes. Give area-based suggestions, what to search for, and practical tips (timing, crowds, safety)."
+    return sys
+
+
+def _direct_story_reply(user_message: str) -> Optional[str]:
+    hinted = _story_from_query_hint(user_message or "")
+    if not hinted:
+        return None
+    text = str(hinted.get("text") or "").strip()
+    if not text:
+        return None
+    return _short_story_text(text, max_len=420)
+
+
+def _direct_etiquette_reply(user_message: str) -> Optional[str]:
+    m = str(user_message or "").lower()
+    if not m:
+        return None
+    if "pashupati" in m or "pashupatinath" in m:
+        return (
+            "At Pashupati, dress modestly (covered shoulders/legs), keep your voice low, and follow the flow of people. "
+            "Some areas are for Hindus only, so if you see signs or a priest guiding people away, just observe from a respectful distance. "
+            "Avoid close-up photos of rituals or cremations — it’s better to watch quietly and let the place set the pace."
+        )
+    if any(k in m for k in ["temple", "stupa", "monastery"]):
+        return (
+            "A good default in Kathmandu’s sacred sites is: dress modestly, walk calmly, and copy the respectful rhythm around you. "
+            "Ask before photographing people, and avoid stepping over offerings or prayer items. "
+            "If you’re unsure about an area, pause and observe — someone will usually guide you with a gesture."
+        )
+    return None
+
+
+def _direct_food_reply(user_message: str) -> Optional[str]:
+    m = str(user_message or "").lower()
+    if not m:
+        return None
+    if "vegetarian" in m or "vegan" in m or "food" in m or "dinner" in m or "cafe" in m or "restaurant" in m:
+        return (
+            "For a quiet vegetarian evening, I’d keep it simple: head to the Boudha side for a slow walk around the stupa after sunset (the mood is calmer), "
+            "then look for a small rooftop spot or Tibetan/Nepali vegetarian place on the side streets rather than the main ring. "
+            "On Google Maps, search things like “vegetarian thakali near Boudha” or “Tibetan veg near Boudhanath” and sort by recent reviews — that’s the quickest way to avoid tourist-crowd places."
+        )
+    return None
+
+
+async def _llm_reply_with_memory(trip_state: Dict[str, Any], history: List[Dict[str, str]], user_message: str) -> str:
+    messages = [{"role": "system", "content": _llm_system_prompt(trip_state, user_message)}]
+    messages.extend(_history_for_llm(history))
+    messages.append({"role": "user", "content": user_message or ""})
+    try:
+        reply = await _ollama_chat(messages)
+        if reply and reply.strip():
+            return reply.strip()
+    except Exception:
+        pass
+    return "I’m here with you — tell me what you’re trying to do in Kathmandu and I’ll guide you step by step."
 
 
 def _context_for_llm(trip_state: Dict[str, Any]) -> str:
@@ -371,9 +565,22 @@ def _context_for_llm(trip_state: Dict[str, Any]) -> str:
             parts.append(f"Comfort: {profile.get('comfort')}.")
         if isinstance(profile.get("preferences"), list) and profile["preferences"]:
             parts.append(f"Preferences: {', '.join(str(p) for p in profile['preferences'][:5])}.")
+
+    hotel_options = trip_state.get("hotel_options") if isinstance(trip_state, dict) else None
+    if isinstance(hotel_options, dict):
+        opts = hotel_options.get("options")
+        if isinstance(opts, list) and opts:
+            names: List[str] = []
+            for o in opts[:2]:
+                if isinstance(o, dict) and o.get("name"):
+                    names.append(str(o.get("name")))
+            if names:
+                parts.append("Hotel options shown to the user: " + ", ".join(names) + ".")
+
     hotel = trip_state.get("hotel") if isinstance(trip_state, dict) else None
     if isinstance(hotel, dict) and hotel.get("name"):
         parts.append(f"Hotel/stay: {hotel.get('name')}.")
+
     planned_names: List[str] = []
     trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
     days = trip.get("days") if isinstance(trip, dict) else None
@@ -389,6 +596,127 @@ def _context_for_llm(trip_state: Dict[str, Any]) -> str:
     if planned_names:
         parts.append("Already chosen (do not suggest again): " + ", ".join(planned_names) + ".")
     return " ".join(parts)
+
+
+def _apply_guide_init(trip_state: Dict[str, Any], guide_init: Dict[str, Any]) -> None:
+    if not isinstance(trip_state, dict) or not isinstance(guide_init, dict):
+        return
+
+    profile_in = guide_init.get("profile")
+    if isinstance(profile_in, dict):
+        profile = trip_state.get("trip_profile")
+        if not isinstance(profile, dict):
+            profile = {}
+            trip_state["trip_profile"] = profile
+
+        td = profile_in.get("time_days")
+        if isinstance(td, int) and 1 <= td <= 14:
+            profile["time_days"] = td
+
+        group_label = profile_in.get("group_label")
+        group_count = profile_in.get("group_count")
+        if isinstance(group_label, str) or isinstance(group_count, int):
+            grp: Dict[str, Any] = {}
+            if isinstance(group_label, str) and group_label.strip():
+                grp["label"] = group_label.strip()
+            if isinstance(group_count, int) and 1 <= group_count <= 10:
+                grp["count"] = group_count
+            if grp:
+                profile["group"] = grp
+
+        comfort = profile_in.get("comfort")
+        if isinstance(comfort, str) and comfort.strip():
+            profile["comfort"] = comfort.strip()
+
+        budget_tier = profile_in.get("budget_tier")
+        if isinstance(budget_tier, str) and budget_tier.strip():
+            profile["budget_tier"] = budget_tier.strip()
+            if budget_tier.strip().lower() in {"flexible", "unknown"}:
+                profile["budget_unknown"] = True
+
+    hotel_options = guide_init.get("hotel_options")
+    if isinstance(hotel_options, dict):
+        trip_state["hotel_options"] = hotel_options
+
+    itinerary = guide_init.get("itinerary")
+    if isinstance(itinerary, dict):
+        days_in = itinerary.get("days")
+        if isinstance(days_in, list) and days_in:
+            trip = trip_state.get("trip")
+            if not isinstance(trip, dict):
+                trip = {"days": [], "current_day": 1, "notes": ""}
+                trip_state["trip"] = trip
+
+            days_out: List[Dict[str, Any]] = []
+            for d in days_in[:14]:
+                if not isinstance(d, dict):
+                    continue
+                di = d.get("dayIndex")
+                if not isinstance(di, int) or di < 1 or di > 14:
+                    continue
+                visits_in = d.get("visits")
+                visits: List[str] = []
+                if isinstance(visits_in, list):
+                    for pid in visits_in[:2]:
+                        if isinstance(pid, str) and pid in PLACES:
+                            visits.append(pid)
+                if not visits:
+                    continue
+                days_out.append({"dayIndex": di, "hotelPlaceId": None, "visits": visits, "confirmed": True})
+            if days_out:
+                trip["days"] = days_out
+                trip["current_day"] = 1
+
+
+def _guide_intro_text(trip_state: Dict[str, Any]) -> str:
+    profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
+    td = None
+    grp_count = None
+    grp_label = None
+    comfort = None
+    budget_tier = None
+    if isinstance(profile, dict):
+        td = profile.get("time_days")
+        comfort = profile.get("comfort")
+        budget_tier = profile.get("budget_tier")
+        group = profile.get("group")
+        if isinstance(group, dict):
+            grp_label = group.get("label")
+            grp_count = group.get("count")
+
+    hotel_options = trip_state.get("hotel_options") if isinstance(trip_state, dict) else None
+    opt_names: List[str] = []
+    if isinstance(hotel_options, dict):
+        opts = hotel_options.get("options")
+        if isinstance(opts, list):
+            for o in opts[:2]:
+                if isinstance(o, dict) and o.get("name"):
+                    opt_names.append(str(o.get("name")))
+
+    ctx_bits: List[str] = []
+    if isinstance(td, int) and td > 0:
+        ctx_bits.append(f"{td}-day")
+    if isinstance(grp_count, int) and grp_count > 0:
+        ctx_bits.append(f"for {grp_count}")
+    elif isinstance(grp_label, str) and grp_label:
+        ctx_bits.append(f"({grp_label})")
+    if isinstance(budget_tier, str) and budget_tier:
+        ctx_bits.append(f"budget: {budget_tier}")
+    if isinstance(comfort, str) and comfort:
+        ctx_bits.append(f"comfort: {comfort}")
+    ctx = " ".join(ctx_bits).strip()
+
+    hotels_line = ""
+    if opt_names:
+        hotels_line = "\n\nI see you have two hotel options on the Results page: " + " vs ".join(opt_names) + ". If you tell me what matters most (quiet sleep, walkability, heritage vibe, amenities), I’ll recommend one with clear reasons."
+
+    return (
+        "Namaste — I’m Aarav, your Kathmandu local guide. "
+        + (f"I’ve loaded your trip ({ctx}). " if ctx else "I’ve loaded your trip details. ")
+        + "Your itinerary is already planned, so I won’t ask you to pick places again — I’ll focus on making the trip smoother, safer, and more enjoyable."
+        + hotels_line
+        + "\n\nAsk me anything like: what to expect at each stop, what’s a fair price for taxis/food, essential apps, cultural etiquette, or a detailed Day 1–Day N walkthrough."
+    )
 
 
 async def _maybe_llm_reply(
@@ -673,6 +1001,21 @@ async def _get_relevant_stories(query: str, limit: int = 2) -> List[Dict[str, An
     try:
         # Add timeout to prevent hanging
         import asyncio
+
+        hinted = _story_from_query_hint(query)
+        if hinted:
+            rest = await asyncio.wait_for(RAG.retrieve(query, top_k=max(1, limit)), timeout=2.0)
+            out = [hinted]
+            for r in rest:
+                if r is hinted:
+                    continue
+                if str(r.get("id")) == str(hinted.get("id")):
+                    continue
+                out.append(r)
+                if len(out) >= limit:
+                    break
+            return out[:limit]
+
         return await asyncio.wait_for(RAG.retrieve(query, top_k=limit), timeout=2.0)
     except Exception:
         return []
@@ -710,6 +1053,8 @@ def _system_prompt() -> str:
                 "- Use short, meaningful stories instead of facts.",
                 "- Avoid Wikipedia-style explanations.",
                 "- Avoid exact prices — always give ranges and disclaimers.",
+                "- Do not invent specific restaurant/hotel/business names or exact claims. If unsure, be honest and suggest how to verify (Google Maps / asking the hotel).",
+                "- When naming places to visit, prefer places from the provided Kathmandu POI list.",
                 "- Mention local realities (traffic, walking pace, crowds) when relevant.",
                 "- Be honest about trade-offs (crowded vs calm, central vs quiet).",
                 "",
@@ -755,7 +1100,19 @@ def _fallback(key: str) -> str:
 
 
 def _rag_text_for_query(query: str, top_k: int = 3) -> str:
+    hinted = _story_from_query_hint(query)
     docs = RAG.retrieve(query, top_k=top_k)
+    if hinted:
+        merged = [hinted]
+        for d in docs:
+            if d is hinted:
+                continue
+            if str(d.get("id")) == str(hinted.get("id")):
+                continue
+            merged.append(d)
+            if len(merged) >= top_k:
+                break
+        docs = merged
     if not docs:
         return ""
     parts = []
@@ -1497,6 +1854,10 @@ async def chat(request: Request) -> JSONResponse:
     if map_event is not None and not isinstance(map_event, dict):
         map_event = None
 
+    guide_init = payload.get("guide_init")
+    if guide_init is not None and not isinstance(guide_init, dict):
+        guide_init = None
+
     session_id, session = _ensure_session(session_id_value)
     trip_state = session["trip_state"]
     history: List[Dict[str, str]] = session["history"]
@@ -1505,10 +1866,52 @@ async def chat(request: Request) -> JSONResponse:
 
     commands.append({"session.storePlaces": PLACES})
 
+    # Results-page entry: seed the personalized guide with full context (profile + itinerary + hotel options).
+    if guide_init is not None:
+        _apply_guide_init(trip_state, guide_init)
+        trip_state["planning_permission"] = True
+        trip_state["ui_stage"] = "guide"
+        intro = _guide_intro_text(trip_state)
+        _push_history(history, "assistant", intro)
+        commands.append({"session.storeProfile": _export_user_profile(trip_state)})
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": intro,
+                "reply": intro,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": [
+                    "Compare my hotel options",
+                    "Give me Day 1 details",
+                    "Fair taxi prices in Kathmandu",
+                    "Essential apps for Nepal",
+                ],
+            }
+        )
+
     if message and trip_state.get("planning_permission") is True:
         _update_trip_profile_from_message(trip_state, message)
 
     commands.append({"session.storeProfile": _export_user_profile(trip_state)})
+
+    # Guide mode: no day-planning prompts. Route directly to LLM with memory + full trip context.
+    if trip_state.get("ui_stage") == "guide" and message and not map_event:
+        _push_history(history, "user", message)
+        reply = await _llm_reply_with_memory(trip_state, history, message)
+        _push_history(history, "assistant", reply)
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": [],
+            }
+        )
 
     profile = trip_state.get("trip_profile") if isinstance(trip_state, dict) else None
     if isinstance(profile, dict):
@@ -1556,45 +1959,80 @@ async def chat(request: Request) -> JSONResponse:
             trip_state["planning_permission"] = False
             trip_state["ui_stage"] = "chat"
 
-    # Handle all conversation through LLM
-    if trip_state.get("planning_permission") is not False:
-        # Use LLM for all responses
-        context = _context_for_llm(trip_state)
-        system_prompt = (
-            "You are Aarav, a calm, experienced Kathmandu local guide. "
-            "Speak naturally and warmly, like a real person, not an AI. "
-            "Help the user plan their Kathmandu trip by asking natural questions about their stay. "
-            "Find out about: how many days, group size, budget comfort level, and interests. "
-            "Don't use forms or lists - just have a natural conversation. "
-            "Once you understand their needs, help them choose a stay area and plan day-by-day activities. "
-            "Keep responses conversational and brief (2-4 sentences)."
-            f"\n\nCurrent context: {context}"
-        )
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": message or "Hello! I'd like to plan a trip to Kathmandu."},
-        ]
-        
-        reply = await _ollama_chat(messages)
-        if not reply or not reply.strip():
-            reply = "Hello! I'm here to help you plan your Kathmandu trip. Tell me about what you're looking for!"
-        
-        return JSONResponse(
-            {
-                "session_id": session_id,
-                "message": reply,
-                "reply": reply,
-                "commands": commands,
-                "trip_state": trip_state,
-                "map_actions": _map_actions_from_state(trip_state),
-                "suggestions": [],
-            }
-        )
+    # Direct, grounded replies for common "unique tourist" questions.
+    # This prevents hallucinated business names / invented lore, and avoids getting stuck in stage prompts.
+    if message:
+        mode = _message_mode(message)
+
+        if mode == "story":
+            direct = _direct_story_reply(message)
+            if direct:
+                _push_history(history, "user", message)
+                _push_history(history, "assistant", direct)
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": direct,
+                        "reply": direct,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [],
+                    }
+                )
+
+        if mode == "etiquette":
+            direct = _direct_etiquette_reply(message)
+            if direct:
+                _push_history(history, "user", message)
+                _push_history(history, "assistant", direct)
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": direct,
+                        "reply": direct,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [],
+                    }
+                )
+
+        if mode == "food":
+            direct = _direct_food_reply(message)
+            if direct:
+                _push_history(history, "user", message)
+                _push_history(history, "assistant", direct)
+                return JSONResponse(
+                    {
+                        "session_id": session_id,
+                        "message": direct,
+                        "reply": direct,
+                        "commands": commands,
+                        "trip_state": trip_state,
+                        "map_actions": _map_actions_from_state(trip_state),
+                        "suggestions": [],
+                    }
+                )
 
     if trip_state.get("planning_permission") is True and trip_state.get("ui_stage") == "day_confirm" and message:
         day_index = _current_day_index(trip_state)
         d = _find_day(trip_state, day_index)
+        if not (_looks_like_yes(message) or _looks_like_no(message)):
+            _push_history(history, "user", message)
+            reply = await _llm_reply_with_memory(trip_state, history, message)
+            _push_history(history, "assistant", reply)
+            return JSONResponse(
+                {
+                    "session_id": session_id,
+                    "message": reply,
+                    "reply": reply,
+                    "commands": commands,
+                    "trip_state": trip_state,
+                    "map_actions": _map_actions_from_state(trip_state),
+                    "suggestions": ["Yes", "No"],
+                }
+            )
         if _looks_like_yes(message):
             if trip_state.get("hotel") and isinstance(d.get("visits"), list) and 1 <= len(d.get("visits")) <= 2:
                 _confirm_day(trip_state, day_index)
@@ -2045,6 +2483,23 @@ async def chat(request: Request) -> JSONResponse:
         )
 
     # Remove final fallback - let main LLM handler catch everything
+
+    if message or map_event:
+        if message:
+            _push_history(history, "user", message)
+        reply = await _llm_reply_with_memory(trip_state, history, message or "")
+        _push_history(history, "assistant", reply)
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "message": reply,
+                "reply": reply,
+                "commands": commands,
+                "trip_state": trip_state,
+                "map_actions": _map_actions_from_state(trip_state),
+                "suggestions": [],
+            }
+        )
 
 
 routes = [
