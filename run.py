@@ -29,7 +29,8 @@ if __name__ == "__main__":
     # Start server
     local_url = "http://localhost:8000"
     os.chdir(SERVER_DIR)
-    proc = run_server(f'"{sys.executable}" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload')
+    reload_flag = " --reload" if os.getenv("NOMADAI_RELOAD", "") == "1" else ""
+    proc = run_server(f'"{sys.executable}" -m uvicorn main:app --host 127.0.0.1 --port 8000{reload_flag}')
     try:
         time.sleep(0.8)
         print(f"\nOpen this in your browser: {local_url}")
@@ -37,10 +38,19 @@ if __name__ == "__main__":
             webbrowser.open(local_url)
         except Exception:
             pass
-        proc.wait()
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            pass
     except KeyboardInterrupt:
         print("\nStopping server...")
         try:
             proc.terminate()
+        except Exception:
+            pass
+    finally:
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
         except Exception:
             pass

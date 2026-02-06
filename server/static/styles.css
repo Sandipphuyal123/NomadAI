@@ -48,11 +48,14 @@ html,
 body {
   height: 100%;
   margin: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background: #f6f7ff;
   color: #0f172a;
   line-height: 1.6;
   font-weight: 400;
+  font-size: 16px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -86,6 +89,8 @@ body {
  .screenPlanner {
   flex: 1;
   min-height: 0;
+  overflow: auto;
+  height: calc(100vh - 64px);
  }
 
 .nav {
@@ -165,6 +170,7 @@ body {
 
 .screen {
   width: 100%;
+  overflow-y: auto;
 }
 
 .screenLanding {
@@ -326,6 +332,8 @@ body {
   padding: 0;
   position: relative;
   min-height: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
  .wizardStep {
@@ -448,15 +456,20 @@ body {
 }
 
 .screenResults {
-  padding-bottom: 48px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  height: calc(100vh - 64px);
 }
 
 .resultsHero {
-  height: 260px;
+  height: 220px;
+  flex-shrink: 0;
   background:
-    linear-gradient(180deg, rgba(15, 23, 42, 0.30), rgba(15, 23, 42, 0.05)),
-    radial-gradient(1200px 600px at 20% 30%, rgba(99, 102, 241, 0.40), rgba(99, 102, 241, 0.0) 60%),
-    radial-gradient(1200px 600px at 70% 10%, rgba(139, 92, 246, 0.35), rgba(139, 92, 246, 0.0) 60%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.65) 0%, rgba(15, 23, 42, 0.4) 50%, rgba(15, 23, 42, 0.1) 100%),
+    url('/images/KATHMANDUBANNER.png') center/cover no-repeat,
     linear-gradient(135deg, #0f172a 0%, #1f2556 50%, #0f172a 100%);
   color: white;
   display: flex;
@@ -516,13 +529,21 @@ body {
   box-shadow: none;
 }
 
+.resultsActionsSpacer {
+  height: 20px;
+  flex-shrink: 0;
+}
+
 .resultsGrid {
   max-width: 1200px;
-  margin: -44px auto 0;
-  padding: 0 20px;
+  margin: 0 auto;
+  padding: 0 20px 20px;
   display: grid;
   grid-template-columns: 1.6fr 1fr;
   gap: 18px;
+  flex: 1;
+  min-height: 0;
+  overflow: visible;
 }
 
 .panel {
@@ -530,6 +551,39 @@ body {
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(15, 23, 42, 0.08);
   box-shadow: 0 26px 60px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+
+.resultsLeft {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.resultsLeft .panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.resultsRight {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.resultsRight .panel {
+  flex-shrink: 0;
+}
+
+.resultsRight .panel:last-of-type {
+  flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -546,6 +600,52 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.itineraryScrollBtn {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.92);
+  color: rgba(15, 23, 42, 0.9);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.18);
+  cursor: pointer;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+}
+
+.itineraryScrollBtn:hover {
+  transform: translateY(-1px);
+}
+
+.recThumb {
+  height: 160px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(139, 92, 246, 0.10));
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background-size: cover;
+  background-position: center;
+  margin-bottom: 12px;
+}
+
+.itinerary::-webkit-scrollbar {
+  width: 6px;
+}
+
+.itinerary::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.3);
+  border-radius: 3px;
 }
 
 .dayCard {
@@ -553,6 +653,54 @@ body {
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: white;
   overflow: hidden;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  transition: box-shadow 0.2s ease;
+}
+
+.dayCard:hover {
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.08);
+}
+
+.dayCardCollapsible .dayHeaderClickable {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dayCardCollapsible .dayHeaderClickable:hover {
+  background: rgba(99, 102, 241, 0.06);
+}
+
+.dayCardCollapsible .dayHeaderClickable:active {
+  background: rgba(99, 102, 241, 0.1);
+}
+
+.dayCardCollapsible.dayCardCollapsed .dayStopsExpandable {
+  display: none !important;
+}
+
+.dayCardCollapsible .dayChevron {
+  font-size: 12px;
+  color: rgba(15, 23, 42, 0.6);
+  transition: transform 0.25s ease;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.dayCardCollapsible .dayHeaderClickable:hover .dayChevron {
+  background: rgba(99, 102, 241, 0.15);
+  color: #4f46e5;
+}
+
+.dayCardCollapsible.dayCardCollapsed .dayChevron {
+  transform: rotate(-90deg);
 }
 
 .dayHeader {
@@ -561,6 +709,11 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  min-height: 48px;
+}
+
+.dayHeaderClickable {
+  width: 100%;
 }
 
 .dayTitle {
@@ -576,20 +729,38 @@ body {
 
 .stop {
   display: grid;
-  grid-template-columns: 84px 1fr;
-  gap: 12px;
+  grid-template-columns: 100px 1fr;
+  gap: 14px;
   border-radius: 14px;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(15, 23, 42, 0.02);
-  padding: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 12px;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.stop:hover {
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.12);
 }
 
 .thumb {
-  width: 84px;
-  height: 64px;
+  width: 100px;
+  height: 76px;
   border-radius: 12px;
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(139, 92, 246, 0.10));
   border: 1px solid rgba(15, 23, 42, 0.08);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  flex-shrink: 0;
+}
+
+.thumbHotel {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.25), rgba(16, 185, 129, 0.12));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: rgba(16, 185, 129, 0.6);
 }
 
 .stopTitle {
@@ -654,6 +825,8 @@ body {
   padding: 14px 16px 18px;
   display: grid;
   gap: 10px;
+  overflow-y: auto;
+  max-height: 200px;
 }
 
 .ovRow {
@@ -836,19 +1009,33 @@ body {
 .chat {
   display: flex;
   flex-direction: column;
+  flex: 1;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: rgba(26, 26, 46, 0.6);
   backdrop-filter: blur(20px);
   min-height: 0;
+  height: 100%;
   box-shadow: var(--shadow-xl);
   overflow: hidden;
+  position: relative;
+}
+
+.screenPlanner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
 }
 
 .screenPlanner .content {
   padding-top: 18px;
+  flex: 1;
+  min-height: 0;
   height: calc(100vh - 64px);
-}
+  overflow: auto;
+ }
 
  .searchContainer {
   border-bottom: 1px solid var(--border) !important;
@@ -875,11 +1062,34 @@ body {
 .chatLog {
   flex: 1;
   padding: 20px;
-  overflow: auto;
+  min-height: 0;
+  overflow-y: scroll;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 16px;
   scroll-behavior: smooth;
+}
+
+.chatScrollBtn {
+  position: absolute;
+  right: 18px;
+  bottom: 86px;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(15, 23, 42, 0.75);
+  color: white;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+}
+
+.chatScrollBtn:hover {
+  transform: translateY(-1px);
 }
 
 .chatLog::-webkit-scrollbar {

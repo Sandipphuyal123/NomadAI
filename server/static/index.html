@@ -64,11 +64,14 @@
             </div>
           </div>
 
+          <div class="resultsActionsSpacer"></div>
+
           <div class="resultsGrid">
             <div class="resultsLeft">
               <div class="panel">
                 <div class="panelTitle">Your Daily Plan</div>
                 <div id="itinerary" class="itinerary"></div>
+                <button id="btnItineraryScroll" class="itineraryScrollBtn isHidden" type="button" aria-label="Scroll to end of daily plan">↓</button>
               </div>
             </div>
 
@@ -102,6 +105,7 @@
                 <div id="searchResults" class="searchResults"></div>
               </div>
               <div id="chatLog" class="chatLog"></div>
+              <button id="btnChatScroll" class="chatScrollBtn isHidden" type="button" aria-label="Scroll to latest message">↓</button>
               <form id="chatForm" class="chatForm">
                 <input id="chatInput" class="chatInput" placeholder="Ask about Kathmandu…" autocomplete="off" />
                 <button class="btn" type="submit">Send</button>
@@ -112,9 +116,6 @@
                   <div class="exportTitle">Export to Google Maps</div>
                 </div>
                 <div id="exportLinks" class="exportLinks"></div>
-              </div>
-              <div class="hint">
-                💡 <strong>Tip:</strong> Click map markers to select places • Right-click to set your hotel • Say "I like [place name]" in chat to add locations
               </div>
             </div>
 

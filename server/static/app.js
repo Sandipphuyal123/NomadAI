@@ -25,6 +25,9 @@ const itineraryEl = document.getElementById('itinerary');
 const hotelRecsEl = document.getElementById('hotelRecs');
 const tripOverviewEl = document.getElementById('tripOverview');
 
+const btnChatScroll = document.getElementById('btnChatScroll');
+const btnItineraryScroll = document.getElementById('btnItineraryScroll');
+
 const wizardStep1 = document.getElementById('wizardStep1');
 const wizardStep2 = document.getElementById('wizardStep2');
 const wizardStep3 = document.getElementById('wizardStep3');
@@ -44,6 +47,68 @@ let plannerBooted = false;
 let currentPlan = null;
 let thinkingEl = null;
 
+function isChatNearBottom() {
+  if (!chatLog) return true;
+  const threshold = 120;
+  const distance = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight;
+  return distance <= threshold;
+}
+
+function updateChatScrollButton() {
+  if (!btnChatScroll || !chatLog) return;
+  const showBtn = !isChatNearBottom() && chatLog.scrollHeight > chatLog.clientHeight + 40;
+  btnChatScroll.classList.toggle('isHidden', !showBtn);
+}
+
+function scrollChatToBottom() {
+  if (!chatLog) return;
+  chatLog.scrollTop = chatLog.scrollHeight;
+  updateChatScrollButton();
+}
+
+function isItineraryNearBottom() {
+  if (!itineraryEl) return true;
+  const threshold = 120;
+  const distance = itineraryEl.scrollHeight - itineraryEl.scrollTop - itineraryEl.clientHeight;
+  return distance <= threshold;
+}
+
+function updateItineraryScrollButton() {
+  if (!btnItineraryScroll || !itineraryEl) return;
+  const showBtn = !isItineraryNearBottom() && itineraryEl.scrollHeight > itineraryEl.clientHeight + 40;
+  btnItineraryScroll.classList.toggle('isHidden', !showBtn);
+}
+
+function scrollItineraryToBottom() {
+  if (!itineraryEl) return;
+  itineraryEl.scrollTop = itineraryEl.scrollHeight;
+  updateItineraryScrollButton();
+}
+
+if (itineraryEl) {
+  itineraryEl.addEventListener('scroll', () => {
+    updateItineraryScrollButton();
+  }, { passive: true });
+}
+
+if (btnItineraryScroll) {
+  btnItineraryScroll.addEventListener('click', () => {
+    scrollItineraryToBottom();
+  });
+}
+
+if (chatLog) {
+  chatLog.addEventListener('scroll', () => {
+    updateChatScrollButton();
+  }, { passive: true });
+}
+
+if (btnChatScroll) {
+  btnChatScroll.addEventListener('click', () => {
+    scrollChatToBottom();
+  });
+}
+
 const wizardState = {
   step: 1,
   destination: 'Kathmandu, Nepal',
@@ -52,7 +117,7 @@ const wizardState = {
   group: 'solo'
 };
 
-const map = L.map('map', { zoomControl: true }).setView([27.7172, 85.3240], 13);
+const map = L.map('map', { zoomControl: true, scrollWheelZoom: false }).setView([27.7172, 85.3240], 13);
 // OpenStreetMap tiles - free and open source
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
@@ -64,6 +129,41 @@ const markerLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
 
 const mapPins = {};
+
+// Ensure chat scrolling works even next to the map.
+// Leaflet can capture wheel events; keep wheel scrolling inside the chat when cursor is over chat.
+if (chatLog) {
+  chatLog.addEventListener(
+    'wheel',
+    (e) => {
+      // Only trap the wheel event when the chat can actually scroll in that direction.
+      // This prevents the page from feeling "locked" when the chat is already at the top/bottom.
+      const deltaY = e.deltaY || 0;
+      const atTop = chatLog.scrollTop <= 0;
+      const atBottom = chatLog.scrollTop + chatLog.clientHeight >= chatLog.scrollHeight - 1;
+      const scrollingUp = deltaY < 0;
+      const scrollingDown = deltaY > 0;
+      const canScrollUp = !atTop;
+      const canScrollDown = !atBottom;
+
+      if ((scrollingUp && canScrollUp) || (scrollingDown && canScrollDown)) {
+        e.stopPropagation();
+      }
+    },
+    { passive: true }
+  );
+}
+
+// Only allow scroll-wheel zoom when the cursor is over the map.
+const mapEl = document.getElementById('map');
+if (mapEl) {
+  mapEl.addEventListener('mouseenter', () => {
+    try { map.scrollWheelZoom.enable(); } catch { }
+  });
+  mapEl.addEventListener('mouseleave', () => {
+    try { map.scrollWheelZoom.disable(); } catch { }
+  });
+}
 
 let isPersonalizedGuide = false;
 
@@ -180,6 +280,12 @@ function usdToNpr(usd) {
   // Approx; we avoid exact pricing guarantees.
   const rate = 132;
   return Math.round(usd * rate);
+}
+
+function hotelImageUrl(name) {
+  const n = String(name || '').trim();
+  if (!n) return '';
+  return `/images/${encodeURIComponent(n)}.jpg`;
 }
 
 function hotelBudgetRangePerNight() {
@@ -351,6 +457,7 @@ async function bootPlannerAsPersonalizedGuide() {
   const data = await apiChat({ session_id: sessionId || null, message: '', guide_init: guideInit });
   applyServerResponse(data);
   addMsg('assistant', data.message || data.reply);
+  await exportToGoogleMaps();
 }
 
 function renderHotelRecs() {
@@ -364,6 +471,13 @@ function renderHotelRecs() {
     const name = opt.name || 'Hotel';
     const card = document.createElement('div');
     card.className = 'recCard';
+
+    const imgUrl = hotelImageUrl(name);
+    const img = document.createElement('div');
+    img.className = 'recThumb';
+    if (imgUrl) {
+      img.style.backgroundImage = `url('${imgUrl}')`;
+    }
 
     const top = document.createElement('div');
     top.className = 'recTop';
@@ -385,7 +499,7 @@ function renderHotelRecs() {
 
     const sm2 = document.createElement('div');
     sm2.className = 'recSmall';
-    sm2.textContent = `Range varies by room type.`;
+    sm2.textContent = `Estimated range — verify current prices on Google Maps.`;
     const link = document.createElement('a');
     link.className = 'stopLink';
     link.href = mapsSearchUrl(`${name}, Kathmandu`);
@@ -393,6 +507,7 @@ function renderHotelRecs() {
     link.rel = 'noreferrer';
     link.textContent = 'View on Google Maps →';
 
+    card.appendChild(img);
     card.appendChild(top);
     card.appendChild(sm2);
     card.appendChild(link);
@@ -408,36 +523,59 @@ function pickPlacesForDays(days) {
   return list.slice(0, need);
 }
 
-function renderItinerary() {
+async function fetchPlaceImages(placeIds) {
+  if (!placeIds || placeIds.length === 0) return {};
+  try {
+    const res = await fetch(`/api/places/images?place_ids=${placeIds.join(',')}`);
+    if (res.ok) {
+      const data = await res.json();
+      return data.images || {};
+    }
+  } catch (e) { console.warn('Place images fetch failed:', e); }
+  return {};
+}
+
+async function renderItinerary() {
   if (!itineraryEl) return;
   itineraryEl.innerHTML = '';
   if (!currentPlan || !Array.isArray(currentPlan.days)) return;
 
+  updateItineraryScrollButton();
+
   const daysArr = currentPlan.days.slice().sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
+  const allPlaceIds = [...new Set(daysArr.flatMap(d => (d.visits || []).slice(0, 2)))];
+  const placeImages = await fetchPlaceImages(allPlaceIds);
 
   for (const day of daysArr) {
     const d = day.dayIndex || 0;
     const card = document.createElement('div');
-    card.className = 'dayCard';
+    card.className = 'dayCard dayCardCollapsible';
 
     const header = document.createElement('div');
-    header.className = 'dayHeader';
+    header.className = 'dayHeader dayHeaderClickable';
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', 'true');
     const title = document.createElement('div');
     title.className = 'dayTitle';
     title.textContent = `Day ${d}`;
+    const chevron = document.createElement('span');
+    chevron.className = 'dayChevron';
+    chevron.textContent = '▼';
     header.appendChild(title);
+    header.appendChild(chevron);
     card.appendChild(header);
 
     const stops = document.createElement('div');
-    stops.className = 'dayStops';
+    stops.className = 'dayStops dayStopsExpandable';
 
     const hotelStop = document.createElement('div');
     hotelStop.className = 'stop';
     hotelStop.innerHTML = `
-      <div class="thumb"></div>
+      <div class="thumb thumbHotel">🏨</div>
       <div>
         <div class="stopTitle">Hotel / Stay</div>
-        <div class="stopMeta">Start point for the day (we\'ll finalize it in the guide).</div>
+        <div class="stopMeta">Start point for the day (we'll finalize it in the guide).</div>
       </div>
     `;
     stops.appendChild(hotelStop);
@@ -447,6 +585,8 @@ function renderItinerary() {
       const p = placesIndex[pid];
       if (!p) continue;
       const name = p.name_en;
+      const imgUrl = placeImages[pid] || null;
+      const thumbStyle = imgUrl ? `background-image: url('${imgUrl}'); background-size: cover;` : '';
       const story = (p.storyShort || p.story || '').toString().trim();
       const meta = story ? story.slice(0, 140) + (story.length > 140 ? '…' : '') : 'A great stop that fits your pace and interests.';
       const etiquette = Array.isArray(p.common_mistakes) && p.common_mistakes.length ? `Etiquette: ${p.common_mistakes[0]}.` : '';
@@ -456,7 +596,7 @@ function renderItinerary() {
       const stop = document.createElement('div');
       stop.className = 'stop';
       stop.innerHTML = `
-        <div class="thumb"></div>
+        <div class="thumb" style="${thumbStyle}"></div>
         <div>
           <div class="stopTitle">${name}</div>
           <div class="stopMeta">${priceTxt}</div>
@@ -476,10 +616,25 @@ function renderItinerary() {
 
     card.appendChild(stops);
     itineraryEl.appendChild(card);
+
+    header.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const isNowCollapsed = card.classList.toggle('dayCardCollapsed');
+      header.setAttribute('aria-expanded', !isNowCollapsed);
+    });
+    header.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        header.click();
+      }
+    });
   }
+
+  updateItineraryScrollButton();
 }
 
-function showResults() {
+async function showResults() {
   hide(screenLanding);
   hide(screenPlanner);
   show(screenResults);
@@ -492,7 +647,7 @@ function showResults() {
 
   renderHotelRecs();
   renderOverview();
-  renderItinerary();
+  await renderItinerary();
 }
 
 async function bootPlannerWithWizardState() {
@@ -844,6 +999,7 @@ function executeCommands(commands) {
     if (k === 'ui.showImages' && payload) {
       const urls = payload.urls || payload[1] || [];
       if (Array.isArray(urls) && urls.length > 0) {
+        const wasNearBottom = isChatNearBottom();
         const el = document.createElement('div');
         el.className = 'msg assistant';
         for (const u of urls.slice(0, 3)) {
@@ -855,7 +1011,8 @@ function executeCommands(commands) {
           el.appendChild(img);
         }
         chatLog.appendChild(el);
-        chatLog.scrollTop = chatLog.scrollHeight;
+        if (wasNearBottom) scrollChatToBottom();
+        else updateChatScrollButton();
       }
       continue;
     }
@@ -863,20 +1020,25 @@ function executeCommands(commands) {
 }
 
 function addMsg(role, text) {
+  if (!chatLog) return;
+  const wasNearBottom = isChatNearBottom();
   const el = document.createElement('div');
   el.className = `msg ${role}`;
   el.textContent = text;
   chatLog.appendChild(el);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (wasNearBottom) scrollChatToBottom();
+  else updateChatScrollButton();
 }
 
 function showThinking() {
   if (!chatLog || thinkingEl) return;
+  const wasNearBottom = isChatNearBottom();
   const el = document.createElement('div');
   el.className = 'msg assistant loading';
   el.textContent = 'NomadAI is thinking…';
   chatLog.appendChild(el);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (wasNearBottom) scrollChatToBottom();
+  else updateChatScrollButton();
   thinkingEl = el;
 }
 
@@ -885,6 +1047,7 @@ function hideThinking() {
     thinkingEl.parentNode.removeChild(thinkingEl);
   }
   thinkingEl = null;
+  updateChatScrollButton();
 }
 
 function renderExportLinks(payload) {
@@ -1248,7 +1411,8 @@ async function showTripDates() {
   }
   
   chatLog.appendChild(calendarDiv);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (isChatNearBottom()) scrollChatToBottom();
+  else updateChatScrollButton();
   
   // Also create a combined calendar link for the entire trip
   if (calendarLinks.length > 0) {
@@ -1339,7 +1503,7 @@ if (wizNext) {
     closeWizard();
     await fetchPlan();
     await loadPlaces();
-    showResults();
+    await showResults();
 
     if (wizNext) {
       wizNext.textContent = 'Generate Plan ✓';

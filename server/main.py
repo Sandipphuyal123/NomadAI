@@ -50,6 +50,37 @@ CACHE_TTL_SECONDS = 3600  # 1 hour
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
+IMAGES_DIR = BASE_DIR.parent / "images"
+
+# Map place names to local image filenames (from images/ folder)
+PLACE_NAME_TO_IMAGE: Dict[str, str] = {
+    "Asan Bazaar": "Asan Bazaar.jpg",
+    "Ason to Durbar Square Walk": "Ason to Durbar Square Walk.jpg",
+    "Balaju Water Garden": "Balaju Water Garden.png",
+    "Bhaktapur Durbar Square": "Bhaktapur Durbar Square.jpg",
+    "Bhote Koshi Roadside Views": "Bhote Koshi Roadside Views.png",
+    "Boudhanath Stupa": "Boudhanath Stupa.jpg",
+    "Budhanilkantha Temple": "Budhanilkantha Temple.jpg",
+    "Central Zoo (Jawalakhel)": "Central Zoo (Jawalakhel).jpg",
+    "Chandragiri Cable Car": "Chandragiri Cable Car.jpg",
+    "Garden of Dreams": "Garden of Dreams.jpg",
+    "Hanuman Dhoka Museum": "Hanuman Dhoka Museum.jpg",
+    "Indra Chowk": "Indra Chowk.jpg",
+    "Kathmandu Durbar Square": "Kathmandu Durbar Square.jpg",
+    "Kirtipur Old Town": "Kirtipur Old Town.jpg",
+    "Kirtipur Viewpoint": "Kirtipur Viewpoint.jpg",
+    "Kopan Monastery": "Kopan Monastery.jpg",
+    "Nagarkot Viewpoint": "Nagarkot Viewpoint.png",
+    "Narayanhiti Palace Museum": "Narayanhiti Palace Museum.jpg",
+    "Panauti Heritage Walk": "Panauti Heritage Walk.jpg",
+    "Pashupatinath Temple": "Pashupatinath Temple.jpg",
+    "Patan Durbar Square": "Patan Durbar Square.jpg",
+    "Pharping Monasteries": "Pharping Monasteries.jpg",
+    "Swayambhunath (Monkey Temple)": "Swayambhunath (Monkey Temple).jpg",
+    "Taudaha Lake": "Taudaha Lake.jpg",
+    "Thamel": "Thamel.png",
+    "White Monastery (Seto Gumba)": "White Monastery (Seto Gumba).jpg",
+}
 
 KATHMANDU_CENTER: Tuple[float, float] = (27.7172, 85.3240)
 
@@ -801,6 +832,10 @@ def _apply_guide_init(trip_state: Dict[str, Any], guide_init: Dict[str, Any]) ->
             if days_out:
                 trip["days"] = days_out
                 trip["current_day"] = 1
+                # Set default hotel (Thamel) so Open routes in Maps and Export work
+                if not trip_state.get("hotel"):
+                    thamel_coords = [27.7150, 85.3123]
+                    trip_state["hotel"] = {"name": "Thamel (default stay area)", "coordinates": thamel_coords}
 
 
 def _guide_intro_text(trip_state: Dict[str, Any]) -> str:
@@ -841,6 +876,19 @@ def _guide_intro_text(trip_state: Dict[str, Any]) -> str:
         ctx_bits.append(f"comfort: {comfort}")
     ctx = " ".join(ctx_bits).strip()
 
+    # Build full day-by-day plan for AI context
+    plan_lines: List[str] = []
+    trip = trip_state.get("trip") if isinstance(trip_state, dict) else None
+    days = trip.get("days") if isinstance(trip, dict) else None
+    if isinstance(days, list):
+        for d in sorted(days, key=lambda x: x.get("dayIndex", 0)):
+            di = d.get("dayIndex")
+            visits = d.get("visits") or []
+            names = [str(PLACES.get(pid, {}).get("name_en", pid)) for pid in visits if isinstance(pid, str)]
+            if names:
+                plan_lines.append(f"Day {di}: Hotel -> {' -> '.join(names)}")
+    plan_text = "\n".join(plan_lines) if plan_lines else ""
+
     hotels_line = ""
     if opt_names:
         hotels_line = "\n\nI see you have two hotel options on the Results page: " + " vs ".join(opt_names) + ". If you tell me what matters most (quiet sleep, walkability, heritage vibe, amenities), I’ll recommend one with clear reasons."
@@ -849,6 +897,7 @@ def _guide_intro_text(trip_state: Dict[str, Any]) -> str:
         "Namaste — I’m Aarav, your Kathmandu local guide. "
         + (f"I’ve loaded your trip ({ctx}). " if ctx else "I’ve loaded your trip details. ")
         + "Your itinerary is already planned, so I won’t ask you to pick places again — I’ll focus on making the trip smoother, safer, and more enjoyable."
+        + (f"\n\nYour full trip plan:\n{plan_text}" if plan_text else "")
         + hotels_line
         + "\n\nAsk me anything like: what to expect at each stop, what’s a fair price for taxis/food, essential apps, cultural etiquette, or a detailed Day 1–Day N walkthrough."
     )
@@ -1931,6 +1980,9 @@ def export_plan(request: Request) -> JSONResponse:
         hc = hotel.get("coordinates")
         if isinstance(hc, list) and len(hc) == 2:
             hotel_coords = hc
+    # Fallback: use Thamel as default when we have itinerary but no hotel set (e.g. from Personalized Guide)
+    if not hotel_coords and days_list:
+        hotel_coords = [27.7150, 85.3123]
 
     links: List[Dict[str, Any]] = []
     for d in days_list:
@@ -2185,7 +2237,7 @@ def places(request: Request) -> JSONResponse:
 
 
 async def place_details(request: Request) -> JSONResponse:
-    """Get detailed information about a place including photos from Foursquare."""
+    """Get detailed information about a place including photos. Uses local images first."""
     place_id = request.query_params.get("place_id")
     if not place_id:
         return JSONResponse({"error": "place_id required"}, status_code=400)
@@ -2194,23 +2246,58 @@ async def place_details(request: Request) -> JSONResponse:
     if not place:
         return JSONResponse({"error": "Place not found"}, status_code=404)
     
-    # Fetch Foursquare details if available
-    foursquare_data = None
-    if FOURSQUARE_USE_API:
-        foursquare_data = await _fetch_foursquare_place_details(
-            place.get("lat", 0),
-            place.get("lng", 0),
-            place.get("name_en", "")
-        )
-    
     result = {**place}
-    if foursquare_data:
-        result["foursquare"] = foursquare_data
-        # Merge photos if available
-        if foursquare_data.get("photos"):
-            result["images"] = foursquare_data["photos"]
+    name_en = str(place.get("name_en", "")).strip()
+    img_filename = PLACE_NAME_TO_IMAGE.get(name_en)
+    if img_filename:
+        result["images"] = [f"/images/{urllib.parse.quote(img_filename)}"]
+    else:
+        # Fallback to Foursquare
+        if FOURSQUARE_USE_API:
+            foursquare_data = await _fetch_foursquare_place_details(
+                place.get("lat", 0),
+                place.get("lng", 0),
+                name_en
+            )
+            if foursquare_data:
+                result["foursquare"] = foursquare_data
+                if foursquare_data.get("photos"):
+                    result["images"] = foursquare_data["photos"]
     
     return JSONResponse(result)
+
+
+async def place_images_batch(request: Request) -> JSONResponse:
+    """Return image URLs for multiple places. Uses local images first, then Foursquare fallback."""
+    ids_param = request.query_params.get("place_ids", "")
+    place_ids = [p.strip() for p in ids_param.split(",") if p.strip()]
+    if not place_ids:
+        return JSONResponse({"images": {}})
+
+    result: Dict[str, str] = {}
+    for pid in place_ids[:20]:
+        place = PLACES.get(pid)
+        if not place:
+            continue
+        name_en = str(place.get("name_en", "")).strip()
+        # Prefer local image from images/ folder
+        img_filename = PLACE_NAME_TO_IMAGE.get(name_en)
+        if img_filename:
+            result[pid] = f"/images/{urllib.parse.quote(img_filename)}"
+            continue
+        # Fallback to Foursquare
+        if FOURSQUARE_USE_API:
+            try:
+                fs = await _fetch_foursquare_place_details(
+                    float(place.get("lat", 0)),
+                    float(place.get("lng", 0)),
+                    name_en
+                )
+                if fs and isinstance(fs.get("photos"), list) and fs["photos"]:
+                    result[pid] = fs["photos"][0]
+            except Exception:
+                pass
+    return JSONResponse({"images": result})
 
 
 async def search_places(request: Request) -> JSONResponse:
@@ -2962,6 +3049,8 @@ routes = [
     Route("/api/places/search", endpoint=search_places, methods=["GET"]),
     Route("/api/chat", endpoint=chat, methods=["POST"]),
     Route("/api/export", endpoint=export_plan, methods=["GET"]),
+    Route("/api/places/images", endpoint=place_images_batch, methods=["GET"]),
+    Mount("/images", app=StaticFiles(directory=str(IMAGES_DIR)), name="images"),
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
 ]
 
