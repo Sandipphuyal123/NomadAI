@@ -36,6 +36,8 @@ const wizDays = document.getElementById('wizDays');
 const wizBack = document.getElementById('wizBack');
 const wizNext = document.getElementById('wizNext');
 
+const btnTheme = document.getElementById('btnTheme');
+
 const SESSION_KEY = 'ktm_session_id_v1';
 
 let sessionId = localStorage.getItem(SESSION_KEY) || '';
@@ -46,6 +48,43 @@ let placesIndex = {};
 let plannerBooted = false;
 let currentPlan = null;
 let thinkingEl = null;
+
+const THEME_KEY = 'nomadai_theme_v1';
+
+function getPreferredTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === 'light' || saved === 'dark') return saved;
+  try {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
+}
+
+function applyTheme(theme) {
+  const t = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t);
+  if (btnTheme) btnTheme.textContent = t === 'dark' ? 'Dark' : 'Light';
+}
+
+function setTheme(theme) {
+  const t = theme === 'dark' ? 'dark' : 'light';
+  localStorage.setItem(THEME_KEY, t);
+  applyTheme(t);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || getPreferredTheme();
+  setTheme(current === 'dark' ? 'light' : 'dark');
+}
+
+applyTheme(getPreferredTheme());
+
+if (btnTheme) {
+  btnTheme.addEventListener('click', () => {
+    toggleTheme();
+  });
+}
 
 function isChatNearBottom() {
   if (!chatLog) return true;

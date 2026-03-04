@@ -22,6 +22,7 @@
           <div class="brandName">NomadAI</div>
         </div>
         <div class="navActions">
+          <button id="btnTheme" class="navBtn navBtnGhost themeToggle" type="button" aria-label="Toggle theme" title="Toggle theme">Theme</button>
           <button id="btnCreateTrip" class="navBtn navBtnGhost" type="button">+ Create Trip</button>
           <button class="navBtn" type="button" disabled>Login</button>
         </div>
@@ -163,10 +164,10 @@
             <h2 class="wizardTitle">Who are you traveling with?</h2>
             <p class="wizardSub">So I can tune the pace.</p>
             <div class="choiceGrid">
-              <button type="button" class="choice" data-group="solo">🧍<div class="choiceLabel">Solo Traveler</div></button>
-              <button type="button" class="choice" data-group="couple">💑<div class="choiceLabel">Couple</div></button>
-              <button type="button" class="choice" data-group="family">👨‍👩‍👧‍👦<div class="choiceLabel">Family</div></button>
-              <button type="button" class="choice" data-group="friends">🧑‍🤝‍🧑<div class="choiceLabel">Group/Friends</div></button>
+              <button type="button" class="choice" data-group="solo"><span class="choiceIcon" aria-hidden="true">🧍</span><div class="choiceLabel">Solo Traveler</div></button>
+              <button type="button" class="choice" data-group="couple"><span class="choiceIcon" aria-hidden="true">💑</span><div class="choiceLabel">Couple</div></button>
+              <button type="button" class="choice" data-group="family"><span class="choiceIcon" aria-hidden="true">👨‍👩‍👧‍👦</span><div class="choiceLabel">Family</div></button>
+              <button type="button" class="choice" data-group="friends"><span class="choiceIcon" aria-hidden="true">🧑‍🤝‍🧑</span><div class="choiceLabel">Group/Friends</div></button>
             </div>
           </div>
         </div>

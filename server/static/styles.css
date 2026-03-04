@@ -6,36 +6,81 @@
   --success: #10b981;
   --warning: #f59e0b;
   --danger: #ef4444;
-  
-  --bg-primary: #0f0f23;
-  --bg-secondary: #1a1a2e;
-  --bg-tertiary: #252542;
-  --surface: #2d2d4a;
-  --surface-light: #3a3a5c;
-  
-  --text-primary: #ffffff;
-  --text-secondary: #a5b4fc;
-  --text-muted: #6b7280;
-  
-  --border: rgba(139, 92, 246, 0.2);
-  --border-hover: rgba(139, 92, 246, 0.4);
-  
-  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.1);
-  --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.2);
-  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.25);
-  
-  --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  --gradient-secondary: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-  --gradient-surface: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-  
+
   --radius-sm: 8px;
   --radius: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
-  
+
   --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   --transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+
+  --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --gradient-secondary: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  --gradient-surface: linear-gradient(135deg, rgba(99, 102, 241, 0.10) 0%, rgba(139, 92, 246, 0.10) 100%);
+}
+
+html {
+  color-scheme: light;
+}
+
+:root,
+[data-theme="light"] {
+  --bg: #f6f7ff;
+  --bg-elevated: rgba(255, 255, 255, 0.82);
+  --bg-elevated-strong: rgba(255, 255, 255, 0.92);
+  --surface: #ffffff;
+  --surface-muted: rgba(15, 23, 42, 0.03);
+
+  --bg-primary: var(--bg);
+  --bg-secondary: var(--bg-elevated);
+  --bg-tertiary: var(--surface);
+
+  --text: #0f172a;
+  --text-muted: rgba(15, 23, 42, 0.68);
+  --text-subtle: rgba(15, 23, 42, 0.52);
+
+  --text-primary: var(--text);
+  --text-secondary: var(--text-muted);
+
+  --border: rgba(15, 23, 42, 0.10);
+  --border-hover: rgba(99, 102, 241, 0.35);
+
+  --shadow-sm: 0 2px 10px rgba(15, 23, 42, 0.06);
+  --shadow: 0 14px 34px rgba(15, 23, 42, 0.10);
+  --shadow-lg: 0 24px 56px rgba(15, 23, 42, 0.14);
+  --shadow-xl: 0 34px 80px rgba(15, 23, 42, 0.18);
+}
+
+[data-theme="dark"] {
+  --bg: #070914;
+  --bg-elevated: rgba(15, 23, 42, 0.58);
+  --bg-elevated-strong: rgba(15, 23, 42, 0.78);
+  --surface: rgba(17, 25, 40, 0.92);
+  --surface-muted: rgba(255, 255, 255, 0.06);
+
+  --bg-primary: var(--bg);
+  --bg-secondary: var(--bg-elevated);
+  --bg-tertiary: rgba(15, 23, 42, 0.72);
+
+  --text: rgba(255, 255, 255, 0.92);
+  --text-muted: rgba(255, 255, 255, 0.70);
+  --text-subtle: rgba(255, 255, 255, 0.55);
+
+  --text-primary: var(--text);
+  --text-secondary: var(--text-muted);
+
+  --border: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(165, 180, 252, 0.45);
+
+  --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.25);
+  --shadow: 0 16px 38px rgba(0, 0, 0, 0.30);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 38px 90px rgba(0, 0, 0, 0.42);
+}
+
+[data-theme="dark"] html {
+  color-scheme: dark;
 }
 
 * {
@@ -51,8 +96,8 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: #f6f7ff;
-  color: #0f172a;
+  background: var(--bg);
+  color: var(--text);
   line-height: 1.6;
   font-weight: 400;
   font-size: 16px;
@@ -61,12 +106,23 @@ body {
 }
 
 body {
+  background-attachment: fixed;
+}
+
+[data-theme="light"] body {
   background:
     radial-gradient(900px 500px at 15% 15%, rgba(99, 102, 241, 0.18) 0%, rgba(99, 102, 241, 0.0) 60%),
     radial-gradient(900px 500px at 85% 35%, rgba(139, 92, 246, 0.16) 0%, rgba(139, 92, 246, 0.0) 60%),
     radial-gradient(900px 500px at 25% 85%, rgba(236, 72, 153, 0.10) 0%, rgba(236, 72, 153, 0.0) 60%),
-    #f6f7ff;
-  background-attachment: fixed;
+    var(--bg);
+}
+
+[data-theme="dark"] body {
+  background:
+    radial-gradient(1100px 600px at 20% 10%, rgba(99, 102, 241, 0.18) 0%, rgba(99, 102, 241, 0.0) 55%),
+    radial-gradient(900px 540px at 90% 30%, rgba(139, 92, 246, 0.15) 0%, rgba(139, 92, 246, 0.0) 60%),
+    radial-gradient(1200px 700px at 35% 90%, rgba(236, 72, 153, 0.10) 0%, rgba(236, 72, 153, 0.0) 65%),
+    linear-gradient(180deg, #070914 0%, #0a0f25 40%, #070914 100%);
 }
 
 .isHidden {
@@ -89,7 +145,7 @@ body {
  .screenPlanner {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   height: calc(100vh - 64px);
  }
 
@@ -99,8 +155,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 24px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(255, 255, 255, 0.7);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
   backdrop-filter: blur(14px);
 }
 
@@ -125,7 +181,7 @@ body {
 .brandName {
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .navActions {
@@ -162,10 +218,15 @@ body {
 }
 
 .navBtnGhost {
-  background: rgba(255, 255, 255, 0.7);
-  color: #0f172a;
-  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
   box-shadow: none;
+}
+
+.navBtnGhost:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  filter: saturate(1.05);
 }
 
 .screen {
@@ -189,9 +250,9 @@ body {
   gap: 8px;
   padding: 10px 14px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.75);
-  border: 1px solid rgba(15, 23, 42, 0.10);
-  color: #1f2937;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -210,7 +271,7 @@ body {
 .heroSub {
   margin: 16px auto 0;
   max-width: 680px;
-  color: rgba(15, 23, 42, 0.7);
+  color: var(--text-muted);
   font-size: 16px;
 }
 
@@ -250,8 +311,8 @@ body {
   width: 160px;
   padding: 14px 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
 }
 
 .featIcon {
@@ -270,14 +331,14 @@ body {
 .featLabel {
   margin-top: 10px;
   font-weight: 600;
-  color: rgba(15, 23, 42, 0.75);
+  color: var(--text-muted);
   font-size: 13px;
 }
 
 .wizardOverlay {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.35);
+  background: rgba(15, 23, 42, 0.55);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -295,8 +356,8 @@ body {
 
 .wizardCard {
   width: min(920px, 100%);
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--bg-elevated-strong);
+  border: 1px solid var(--border);
   border-radius: 18px;
   box-shadow: 0 30px 70px rgba(15, 23, 42, 0.25);
   overflow: hidden;
@@ -332,9 +393,9 @@ body {
   padding: 0;
   position: relative;
   min-height: 260px;
-  max-height: 60vh;
-  overflow-y: auto;
-}
+  max-height: none;
+  overflow: visible;
+ }
 
  .wizardStep {
   padding: 26px 28px 6px;
@@ -371,12 +432,12 @@ body {
 .wizardTitle {
   font-size: 26px;
   letter-spacing: -0.02em;
-  color: #0f172a;
+  color: var(--text);
 }
 
 .wizardSub {
   margin-top: 6px;
-  color: rgba(15, 23, 42, 0.6);
+  color: var(--text-muted);
 }
 
 .field {
@@ -388,7 +449,7 @@ body {
   display: block;
   font-size: 13px;
   font-weight: 600;
-  color: rgba(15, 23, 42, 0.65);
+  color: var(--text-muted);
   margin-bottom: 8px;
 }
 
@@ -396,8 +457,9 @@ body {
   width: 100%;
   padding: 12px 14px;
   border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.14);
-  background: white;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
   font-weight: 600;
   outline: none;
   transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
@@ -418,13 +480,31 @@ body {
 .choice {
   padding: 18px 14px;
   border-radius: 16px;
-  border: 1px solid rgba(15, 23, 42, 0.12);
-  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
   cursor: pointer;
   text-align: center;
   font-weight: 800;
-  color: rgba(15, 23, 42, 0.78);
+  color: var(--text);
   transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.choiceIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 18px;
+  background: rgba(99, 102, 241, 0.10);
+  border: 1px solid var(--border);
+  font-size: 28px;
+  line-height: 1;
 }
 
 .choice:hover {
@@ -445,7 +525,7 @@ body {
   margin-top: 10px;
   font-size: 13px;
   font-weight: 700;
-  color: rgba(15, 23, 42, 0.65);
+  color: var(--text-muted);
 }
 
 .wizardFooter {
@@ -548,9 +628,9 @@ body {
 
 .panel {
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.78);
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  box-shadow: 0 26px 60px rgba(15, 23, 42, 0.08);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -591,8 +671,9 @@ body {
   padding: 16px 18px;
   font-weight: 800;
   letter-spacing: -0.01em;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.07);
-  background: rgba(255, 255, 255, 0.65);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated-strong);
+  color: var(--text);
 }
 
 .itinerary {
@@ -650,10 +731,10 @@ body {
 
 .dayCard {
   border-radius: 16px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: white;
+  border: 1px solid var(--border);
+  background: var(--surface);
   overflow: hidden;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--shadow-sm);
   transition: box-shadow 0.2s ease;
 }
 
@@ -732,8 +813,8 @@ body {
   grid-template-columns: 100px 1fr;
   gap: 14px;
   border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--border);
+  background: var(--surface);
   padding: 12px;
   transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
@@ -770,7 +851,7 @@ body {
 
 .stopMeta {
   margin-top: 3px;
-  color: rgba(15, 23, 42, 0.65);
+  color: var(--text-muted);
   font-size: 13px;
 }
 
@@ -792,8 +873,8 @@ body {
 
 .recCard {
   border-radius: 16px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: white;
+  border: 1px solid var(--border);
+  background: var(--surface);
   padding: 14px;
 }
 
@@ -811,13 +892,13 @@ body {
 
 .recPrice {
   font-weight: 900;
-  color: rgba(15, 23, 42, 0.78);
+  color: var(--text-muted);
   text-align: right;
 }
 
 .recSmall {
   margin-top: 6px;
-  color: rgba(15, 23, 42, 0.62);
+  color: var(--text-subtle);
   font-size: 13px;
 }
 
@@ -835,18 +916,18 @@ body {
   gap: 12px;
   padding: 10px 12px;
   border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(15, 23, 42, 0.02);
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
 }
 
 .ovKey {
   font-weight: 800;
-  color: rgba(15, 23, 42, 0.62);
+  color: var(--text-subtle);
 }
 
 .ovVal {
   font-weight: 900;
-  color: rgba(15, 23, 42, 0.80);
+  color: var(--text);
 }
 
 .app {
@@ -861,7 +942,7 @@ body {
   justify-content: space-between;
   padding: 16px 20px;
   border-bottom: 1px solid var(--border);
-  background: rgba(26, 26, 46, 0.8);
+  background: var(--bg-elevated-strong);
   backdrop-filter: blur(20px);
   gap: 12px;
 }
@@ -904,7 +985,7 @@ body {
 
 .btn {
   background: var(--gradient-primary);
-  color: var(--text-primary);
+  color: #ffffff;
   border: none;
   border-radius: var(--radius);
   padding: 12px 20px;
@@ -960,7 +1041,7 @@ body {
 .btnGhost {
   background: transparent;
   border: 1px solid var(--border);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   box-shadow: none;
 }
 
@@ -982,17 +1063,20 @@ body {
   max-width: 1600px;
   margin: 0 auto;
   width: 100%;
-}
+  height: 100%;
+  overflow: hidden;
+ }
 
-.map {
+ .map {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: var(--shadow-xl);
   position: relative;
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
   min-height: 0;
-}
+  height: 100%;
+ }
 
 .map::before {
   content: '';
@@ -1006,64 +1090,59 @@ body {
   opacity: 0.5;
 }
 
-.chat {
+ .chat {
   display: flex;
   flex-direction: column;
   flex: 1;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: rgba(26, 26, 46, 0.6);
+  background: var(--bg-elevated);
   backdrop-filter: blur(20px);
   min-height: 0;
   height: 100%;
   box-shadow: var(--shadow-xl);
   overflow: hidden;
   position: relative;
-}
+ }
 
-.screenPlanner {
+ .screenPlanner {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: auto;
-}
+  overflow: hidden;
+ }
 
-.screenPlanner .content {
+ .screenPlanner .content {
   padding-top: 18px;
   flex: 1;
   min-height: 0;
   height: calc(100vh - 64px);
-  overflow: auto;
+  overflow: hidden;
  }
 
  .searchContainer {
   border-bottom: 1px solid var(--border) !important;
-  background: rgba(37, 37, 66, 0.6);
+  background: var(--bg-elevated-strong);
   padding: 12px !important;
  }
 
- .searchContainer .chatInput {
-  width: 100%;
-  margin-bottom: 0;
- }
-
  .searchResults {
-  background: rgba(255, 255, 255, 0.98) !important;
+  background: var(--bg-elevated-strong) !important;
   display: none;
   max-height: 220px;
   overflow: auto;
   margin-top: 10px;
   border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.10);
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
  }
 
 .chatLog {
   flex: 1;
   padding: 20px;
   min-height: 0;
-  overflow-y: scroll;
+  overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
@@ -1147,7 +1226,7 @@ body {
   gap: 12px;
   padding: 20px;
   border-top: 1px solid var(--border);
-  background: rgba(37, 37, 66, 0.6);
+  background: var(--bg-elevated-strong);
   backdrop-filter: blur(10px);
 }
 
@@ -1155,8 +1234,8 @@ body {
   flex: 1;
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--surface);
+  color: var(--text);
   padding: 14px 18px;
   outline: none;
   font-size: 0.95rem;
@@ -1189,7 +1268,7 @@ body {
   user-select: none;
   border: 1px solid var(--border);
   background: var(--surface);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   transition: var(--transition);
   font-weight: 500;
   box-shadow: var(--shadow-sm);
@@ -1221,7 +1300,7 @@ body {
   margin: 16px 20px 0 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: var(--surface);
+  background: var(--bg-elevated-strong);
   overflow: hidden;
   box-shadow: var(--shadow);
 }
@@ -1253,9 +1332,9 @@ body {
 .exportLink {
   display: block;
   text-decoration: none;
-  color: var(--text-primary);
+  color: var(--text);
   border: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  background: var(--surface);
   border-radius: var(--radius);
   padding: 14px 18px;
   font-weight: 600;
@@ -1446,12 +1525,24 @@ body {
 
 /* Dark mode enhancements */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg-primary: #0a0a0f;
-    --bg-secondary: #151520;
-    --bg-tertiary: #1f1f2e;
-    --surface: #252535;
-    --surface-light: #2f2f45;
+  :root:not([data-theme]) {
+    --bg: #070914;
+    --bg-elevated: rgba(15, 23, 42, 0.58);
+    --bg-elevated-strong: rgba(15, 23, 42, 0.78);
+    --surface: rgba(17, 25, 40, 0.92);
+    --surface-muted: rgba(255, 255, 255, 0.06);
+
+    --text: rgba(255, 255, 255, 0.92);
+    --text-muted: rgba(255, 255, 255, 0.70);
+    --text-subtle: rgba(255, 255, 255, 0.55);
+
+    --border: rgba(255, 255, 255, 0.12);
+    --border-hover: rgba(165, 180, 252, 0.45);
+
+    --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.25);
+    --shadow: 0 16px 38px rgba(0, 0, 0, 0.30);
+    --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.35);
+    --shadow-xl: 0 38px 90px rgba(0, 0, 0, 0.42);
   }
 }
 
